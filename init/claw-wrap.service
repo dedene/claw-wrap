@@ -1,0 +1,31 @@
+[Unit]
+Description=Claw-Wrap Secrets Daemon
+Documentation=https://github.com/peterdenene/claw-wrap
+Before=openclaw-gateway.service
+After=network.target
+
+[Service]
+Type=simple
+User=peter
+ExecStart=/usr/local/bin/claw-wrap daemon
+Restart=always
+RestartSec=5
+
+# Create runtime directory for socket (preserve contents across restarts)
+RuntimeDirectory=openclaw
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Environment for pass/GPG access
+Environment=HOME=/home/peter
+Environment=GNUPGHOME=/home/peter/.gnupg
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/openclaw
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
