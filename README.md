@@ -1,6 +1,16 @@
-# claw-wrap
+<div align="center">
+  <img src="docs/assets/claw-wrap-hero.png" width="220" alt="claw-wrap lobster in a burrito" />
+  <h1>claw-wrap</h1>
+  <p>A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes - credentials never enter the sandbox.</p>
+  <p>
+    <a href="docs/INSTALL.md">Install</a> ·
+    <a href="docs/CONFIG.md">Config</a> ·
+    <a href="docs/SPEC.md">Protocol</a> ·
+    <a href="docs/MIGRATION.md">Migration</a>
+  </p>
+</div>
 
-A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes - credentials never enter the sandbox.
+---
 
 ## Features
 
