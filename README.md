@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/claw-wrap-hero.png" width="220" alt="claw-wrap lobster in a burrito" />
+  <img src="docs/assets/claw-wrap-hero.png" width="160" alt="claw-wrap lobster in a burrito" />
   <h1>claw-wrap</h1>
   <p>A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes - credentials never enter the sandbox.</p>
   <p>
