@@ -170,6 +170,10 @@ make clean              # Remove build artifacts
 - `pass` (password-store)
 - GPG (for pass decryption)
 
+## CI
+
+GitHub Actions runs `make test` on `ubuntu-latest` for pushes and PRs to `main`.
+
 ## License
 
 MIT
