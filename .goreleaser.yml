@@ -35,9 +35,13 @@ brews:
       owner: dedene
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: "https://github.com/dedene/claw-wrap"
-    description: "Credential proxy for CLI tools — secrets never enter the sandbox"
-    license: "MIT"
+    commit_author:
+      name: Peter Dedene
+      email: peter@dedene.com
+    directory: Formula
+    homepage: https://github.com/dedene/claw-wrap
+    description: Credential proxy for CLI tools — secrets never enter the sandbox
+    license: MIT
     install: |
       bin.install "claw-wrap"
     test: |
