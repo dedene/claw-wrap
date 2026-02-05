@@ -52,14 +52,25 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## Installation
+
+### Homebrew (Linux)
 
 ```bash
-# Build
-make build
+brew install dedene/tap/claw-wrap
+```
 
-# Install binary and service
+### From source
+
+```bash
+make build
 sudo make install
+```
+
+### Setup
+
+```bash
+# Install systemd service
 sudo cp init/claw-wrap.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now claw-wrap
