@@ -1,0 +1,44 @@
+version: 2
+
+builds:
+  - main: ./cmd/claw-wrap
+    binary: claw-wrap
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - init/claw-wrap.service
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^style:"
+
+brews:
+  - repository:
+      owner: dedene
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/dedene/claw-wrap"
+    description: "Credential proxy for CLI tools — secrets never enter the sandbox"
+    license: "MIT"
+    install: |
+      bin.install "claw-wrap"
+    test: |
+      system "#{bin}/claw-wrap", "version"

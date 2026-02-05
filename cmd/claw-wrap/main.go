@@ -23,7 +23,7 @@ import (
 	"claw-wrap/internal/wrapper"
 )
 
-const version = "1.0.0"
+var version = "dev"
 
 func main() {
 	execName := filepath.Base(os.Args[0])

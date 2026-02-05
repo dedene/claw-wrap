@@ -1,4 +1,4 @@
-.PHONY: build install clean test fmt lint
+.PHONY: build install clean test fmt lint release-dry-run
 
 BINARY := claw-wrap
 BUILD_DIR := ./build
@@ -36,6 +36,9 @@ dev: fmt lint build
 
 run-daemon: build
 	$(BUILD_DIR)/$(BINARY) daemon
+
+release-dry-run:
+	goreleaser release --snapshot --clean
 
 # Remove old standalone claw-wrap.go if it exists
 clean-old:
