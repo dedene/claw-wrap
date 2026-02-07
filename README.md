@@ -117,7 +117,8 @@ tools:
 
 ```bash
 sudo cp init/claw-wrap.service /etc/systemd/system/
-# Edit the service file: set User= to your username
+# Edit User=YOUR_USERNAME to your actual username
+sudo editor /etc/systemd/system/claw-wrap.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now claw-wrap
 ```
@@ -183,7 +184,7 @@ The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited e
 
 claw-wrap is designed to work with [firejail](https://firejail.wordpress.com/) in **whitelist mode** (deny-by-default). The sandbox can access `/run/openclaw` (socket + auth file) but NOT `~/.password-store`, `~/.gnupg`, or `~/.ssh`.
 
-See [docs/SANDBOX.md](docs/SANDBOX.md) for a complete firejail setup guide with an annotated example profile.
+See [docs/SANDBOX.md](docs/SANDBOX.md) for the full guide, including a production firejail profile for [OpenClaw](https://github.com/openclaw/openclaw) and a self-restart mechanism that lets the sandboxed gateway update itself.
 
 ## Documentation
 

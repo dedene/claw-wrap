@@ -1,8 +1,8 @@
-# Sandbox Setup (Firejail)
+# Sandbox Setup (Firejail + OpenClaw)
 
-claw-wrap is designed for sandboxed environments where an untrusted process (e.g. an AI agent) needs to call CLI tools with credentials it should never see.
+This guide covers running [OpenClaw](https://github.com/openclaw/openclaw) inside a [firejail](https://firejail.wordpress.com/) whitelist sandbox with claw-wrap providing credential access.
 
-[Firejail](https://firejail.wordpress.com/) in **whitelist mode** is the recommended sandbox. In whitelist mode, everything is denied by default — only explicitly listed paths are accessible. This means `~/.password-store`, `~/.gnupg`, and `~/.ssh` simply don't exist inside the sandbox.
+In whitelist mode, everything is denied by default. Only explicitly listed paths are accessible — `~/.password-store`, `~/.gnupg`, and `~/.ssh` simply don't exist inside the sandbox. The agent accesses CLI tools through claw-wrap symlinks, which proxy credentials from outside.
 
 ## Install Firejail
 
@@ -14,40 +14,41 @@ sudo apt install firejail
 sudo pacman -S firejail
 ```
 
-## Example Profile
+## Firejail Profile
 
-This is a production profile for running a Node.js application (e.g. an AI agent gateway) inside firejail with claw-wrap:
+Create `/etc/firejail/openclaw-gateway.profile`:
 
 ```
-# /etc/firejail/my-agent.profile
-#
-# Whitelist mode — deny by default.
-# Only explicitly listed paths are accessible.
+# OpenClaw Gateway Firejail Profile (Whitelist Mode)
+# Deny by default — only explicitly listed paths are accessible.
 
 # === ISOLATED FILESYSTEMS ===
 private-tmp
+allusers
 
 # === HOME DIRECTORY WHITELIST ===
-# Only these paths under ~ exist in the sandbox.
-# ~/.password-store, ~/.gnupg, ~/.ssh are NOT listed = invisible.
+# Everything else (including ~/.password-store, ~/.gnupg, ~/.ssh)
+# simply doesn't exist in the sandbox.
 
-# Application workspace and config
-whitelist ${HOME}/.myapp
-whitelist ${HOME}/.config/myapp
+# OpenClaw workspace and config
+whitelist ${HOME}/.openclaw
+whitelist ${HOME}/.config/openclaw
 whitelist ${HOME}/.bashrc
 whitelist ${HOME}/.profile
 
-# Node.js / runtime dependencies (adjust for your stack)
+# Node.js / runtime dependencies
 whitelist ${HOME}/.npm-global
 whitelist ${HOME}/.local/share/pnpm
 whitelist ${HOME}/.local/bin
 whitelist ${HOME}/.cache
 whitelist ${HOME}/.bun
 
-# Tool-specific config dirs (if tools write config inside sandbox)
+# Tool-specific config dirs
+whitelist ${HOME}/.config/gogcli
+whitelist ${HOME}/.config/qmd
 whitelist ${HOME}/.config/gh
 
-# Linuxbrew (if tools are installed via Homebrew)
+# Linuxbrew (for gh, gog, and other tools)
 noblacklist /home/linuxbrew
 whitelist /home/linuxbrew/.linuxbrew
 
@@ -68,16 +69,16 @@ whitelist /etc/passwd
 whitelist /etc/group
 whitelist /usr/share/zoneinfo
 
-# === CLAW-WRAP (CRITICAL) ===
-# The Unix socket and HMAC auth file must be accessible
+# === CLAW-WRAP ===
+# Unix socket (credential proxy) + HMAC auth file + restart sentinel
 noblacklist /run/openclaw
 whitelist /run/openclaw
 
 # === SECURITY HARDENING ===
-caps.drop all       # Drop all Linux capabilities
-nonewprivs          # Prevent privilege escalation
-noroot              # No root inside sandbox
-seccomp             # Syscall filtering
+caps.drop all
+nonewprivs
+noroot
+seccomp
 
 # Disable unnecessary features
 no3d
@@ -92,54 +93,140 @@ novideo
 # Network: only what's needed
 protocol unix,inet,inet6,netlink
 
-# Set PATH to include tool locations
-env PATH=/usr/local/bin:/home/USER/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin
+# PATH must include tool locations
+env PATH=/usr/local/bin:/home/YOUR_USERNAME/.local/bin:/home/YOUR_USERNAME/.bun/bin:/home/YOUR_USERNAME/.npm-global/bin:/home/YOUR_USERNAME/.local/share/pnpm:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/bin:/bin
+env BASH_ENV=/home/YOUR_USERNAME/.bashrc
 ```
 
-Replace `USER` with your actual username.
+Replace `YOUR_USERNAME` with your actual username.
 
 ## What to Whitelist
 
 | Path | Why |
 |------|-----|
-| `/run/openclaw` | Unix socket + HMAC auth file. **Required** for claw-wrap |
-| `~/.config/<tool>` | Tool-specific config dirs (if the tool reads config at runtime) |
+| `/run/openclaw` | claw-wrap socket, HMAC auth file, restart sentinel |
+| `~/.openclaw` | OpenClaw workspace, config, agents, cron jobs |
+| `~/.npm-global` | Globally installed Node.js packages (including OpenClaw itself) |
+| `~/.config/gogcli` | gog (Google CLI) config and encrypted keyring |
 | `/home/linuxbrew/.linuxbrew` | Homebrew-installed binaries (gh, gog, etc.) |
 | `/etc/ssl/certs` | HTTPS/TLS connections |
-| `~/.cache` | Runtime caches (npm, node, etc.) |
 
 ## What NOT to Whitelist
 
 | Path | Why |
 |------|-----|
-| `~/.password-store` | Contains GPG-encrypted secrets — the whole point of claw-wrap |
+| `~/.password-store` | GPG-encrypted secrets — claw-wrap handles access |
 | `~/.gnupg` | GPG keys used to decrypt pass entries |
 | `~/.ssh` | SSH keys |
-| `/etc/openclaw/wrappers.yaml` | Contains credential source paths — not needed inside sandbox |
+| `/etc/openclaw/wrappers.yaml` | Credential source paths — not needed inside sandbox |
 
-## Running Your Application
+## Systemd Services
 
-```bash
-firejail --profile=/etc/firejail/my-agent.profile \
-  node /path/to/your/agent/server.js
-```
+Three systemd units work together: the gateway service (firejailed), and a path unit that lets the gateway trigger its own restart from inside the sandbox.
 
-Or as a systemd service:
+### openclaw-gateway.service
 
 ```ini
+[Unit]
+Description=OpenClaw Gateway (sandboxed)
+Requires=claw-wrap.service
+After=claw-wrap.service
+
 [Service]
-ExecStart=/usr/bin/firejail --profile=/etc/firejail/my-agent.profile \
-  node /path/to/your/agent/server.js
+Type=simple
+# TODO: Set to your username
+User=YOUR_USERNAME
+ExecStartPre=/bin/bash -c '\
+  systemd-creds decrypt gateway-token - | \
+  { read val; echo "OPENCLAW_GATEWAY_TOKEN=$val"; } >> /run/openclaw/env && \
+  systemd-creds decrypt telegram-token - | \
+  { read val; echo "TELEGRAM_BOT_TOKEN=$val"; } >> /run/openclaw/env'
+ExecStart=/usr/bin/firejail \
+  --profile=/etc/firejail/openclaw-gateway.profile \
+  /usr/bin/node /home/YOUR_USERNAME/.npm-global/lib/node_modules/openclaw/dist/index.js \
+  gateway --port 18789
+Restart=always
+RestartSec=5
+
+EnvironmentFile=-/run/openclaw/env
+
+SetCredentialEncrypted=gateway-token: ...
+SetCredentialEncrypted=telegram-token: ...
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Adjust the `ExecStartPre` and `SetCredentialEncrypted` lines for your own secrets, or remove them if you don't need encrypted credentials.
+
+### Self-Restart Mechanism
+
+The gateway runs inside firejail and cannot call `systemctl`. But it can write to `/run/openclaw/` (whitelisted). A systemd path unit watches for a sentinel file — when the gateway touches it, systemd restarts the service from outside the sandbox.
+
+This enables self-updates: the gateway installs a new version via npm, then signals for a restart.
+
+**openclaw-gateway-restart.path:**
+
+```ini
+[Unit]
+Description=Watch for OpenClaw gateway restart request
+BindsTo=openclaw-gateway.service
+After=openclaw-gateway.service
+
+[Path]
+PathExists=/run/openclaw/restart
+Unit=openclaw-gateway-restart.service
+
+[Install]
+WantedBy=openclaw-gateway.service
+```
+
+**openclaw-gateway-restart.service:**
+
+```ini
+[Unit]
+Description=Restart OpenClaw gateway
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'rm -f /run/openclaw/restart && systemctl restart openclaw-gateway.service'
+User=root
+```
+
+### Install the units
+
+```bash
+sudo cp openclaw-gateway.service /etc/systemd/system/
+sudo cp openclaw-gateway-restart.path /etc/systemd/system/
+sudo cp openclaw-gateway-restart.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now openclaw-gateway.service
+```
+
+The path unit starts automatically with the gateway (via `WantedBy=openclaw-gateway.service`).
+
+### How self-update works
+
+```
+1. Gateway detects new version available
+2. Runs: npm install -g openclaw@latest
+   (writes to ~/.npm-global — whitelisted in firejail)
+3. Runs: touch /run/openclaw/restart
+   (writes to /run/openclaw — whitelisted in firejail)
+4. systemd path unit detects /run/openclaw/restart
+5. Triggers openclaw-gateway-restart.service (as root)
+6. That service removes the sentinel and restarts the gateway
+7. Gateway comes back up with the new version
 ```
 
 ## Verifying Isolation
 
-After starting your sandboxed process, verify from **inside** the sandbox:
+After the gateway is running, verify from inside the sandbox:
 
 ### Credentials are invisible
 
 ```bash
-# These should fail — paths don't exist in sandbox
+# These paths don't exist inside the sandbox
 ls ~/.password-store     # No such file or directory
 ls ~/.gnupg              # No such file or directory
 cat /etc/openclaw/wrappers.yaml  # No such file or directory
@@ -148,17 +235,17 @@ cat /etc/openclaw/wrappers.yaml  # No such file or directory
 ### Tools work through claw-wrap
 
 ```bash
-# This should succeed — goes through claw-wrap daemon
+# Works — proxied through claw-wrap daemon
 gh repo list
 
-# Direct credential access should fail
-echo $GH_TOKEN           # Empty — token is never in the environment
+# Token is never in the environment
+echo $GH_TOKEN           # Empty
 ```
 
-### Socket attack is blocked
+### Socket attack is rejected
 
 ```bash
-# Attempt to extract credentials via socket — should fail with auth error
+# Raw socket connection without HMAC — rejected
 node -e "
   const net = require('net');
   const c = net.connect('/run/openclaw/secrets.sock');
@@ -168,4 +255,12 @@ node -e "
 # Expected: {"type":"error","message":"authentication failed"}
 ```
 
-The daemon verifies HMAC signatures on every request. Only `claw-wrap` (via symlinks) can authenticate — raw socket connections are rejected.
+### Self-restart works
+
+```bash
+# From inside the sandbox (or as the gateway user):
+touch /run/openclaw/restart
+
+# Watch the gateway restart:
+sudo journalctl -u openclaw-gateway -f
+```

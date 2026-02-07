@@ -81,13 +81,14 @@ See [CONFIG.md](CONFIG.md) for all configuration options.
 sudo cp init/claw-wrap.service /etc/systemd/system/
 ```
 
-Edit the service file to set your username and GPG home:
+Edit `User=` in the service file to your username:
 
 ```bash
 sudo editor /etc/systemd/system/claw-wrap.service
-# Set User= to your username
-# Set GNUPGHOME= to your GPG directory (usually ~/.gnupg)
+# Change User=YOUR_USERNAME to your actual username
 ```
+
+> If your GPG home is not the default `~/.gnupg`, also add `Environment=GNUPGHOME=/path/to/.gnupg` to the service file.
 
 ```bash
 sudo systemctl daemon-reload
