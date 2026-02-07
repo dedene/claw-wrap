@@ -143,28 +143,27 @@ After=claw-wrap.service
 Type=simple
 # TODO: Set to your username
 User=YOUR_USERNAME
-ExecStartPre=/bin/bash -c '\
-  systemd-creds decrypt gateway-token - | \
-  { read val; echo "OPENCLAW_GATEWAY_TOKEN=$val"; } >> /run/openclaw/env && \
-  systemd-creds decrypt telegram-token - | \
-  { read val; echo "TELEGRAM_BOT_TOKEN=$val"; } >> /run/openclaw/env'
-ExecStart=/usr/bin/firejail \
-  --profile=/etc/firejail/openclaw-gateway.profile \
-  /usr/bin/node /home/YOUR_USERNAME/.npm-global/lib/node_modules/openclaw/dist/index.js \
-  gateway --port 18789
+
+# Secrets loaded from $CREDENTIALS_DIRECTORY into env vars in-memory — never written to disk.
+ExecStart=/bin/bash -c '\
+  export OPENCLAW_GATEWAY_TOKEN="$(cat $CREDENTIALS_DIRECTORY/openclaw-gateway-token)"; \
+  export TELEGRAM_BOT_TOKEN="$(cat $CREDENTIALS_DIRECTORY/telegram-bot-token)"; \
+  exec /usr/bin/firejail --profile=/etc/firejail/openclaw-gateway.profile \
+    /usr/bin/node /home/YOUR_USERNAME/.npm-global/lib/node_modules/openclaw/dist/index.js \
+    gateway --port 18789'
+
 Restart=always
 RestartSec=5
 
-EnvironmentFile=-/run/openclaw/env
-
-SetCredentialEncrypted=gateway-token: ...
-SetCredentialEncrypted=telegram-token: ...
+# Encrypted credentials — decrypted by systemd at service start
+LoadCredentialEncrypted=openclaw-gateway-token:/home/YOUR_USERNAME/.config/systemd/credentials/openclaw-gateway-token
+LoadCredentialEncrypted=telegram-bot-token:/home/YOUR_USERNAME/.config/systemd/credentials/telegram-bot-token
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Adjust the `ExecStartPre` and `SetCredentialEncrypted` lines for your own secrets, or remove them if you don't need encrypted credentials.
+Add your own `LoadCredentialEncrypted` lines for each secret you need, with matching `export` lines in the `ExecStart` wrapper. If you don't need encrypted credentials, use plain `Environment=` directives instead and simplify `ExecStart` to call firejail directly.
 
 #### Self-Restart Mechanism
 
@@ -211,6 +210,54 @@ sudo systemctl enable --now openclaw-gateway.service
 ```
 
 The path unit starts automatically with the gateway (via `WantedBy=openclaw-gateway.service`).
+
+#### Encrypted Credentials
+
+The gateway needs its own secrets (auth token, bot token) that aren't CLI tool credentials handled by claw-wrap. These shouldn't sit in plaintext config files. systemd's `LoadCredentialEncrypted` keeps them encrypted at rest and only decrypted in memory at service start.
+
+**Encrypt a secret:**
+
+```bash
+mkdir -p ~/.config/systemd/credentials
+echo -n 'your-secret-value' | sudo systemd-creds encrypt \
+  --name=openclaw-gateway-token - \
+  ~/.config/systemd/credentials/openclaw-gateway-token
+```
+
+This creates an encrypted file bound to your machine (via TPM or host key). Only systemd on this machine can decrypt it.
+
+**How it flows at service start:**
+
+```
+Encrypted at rest                  In memory only
+┌──────────────────────┐           ┌────────────────────┐
+│ ~/.config/systemd/   │  systemd  │ $CREDENTIALS_DIR   │  bash    ┌────────────┐  exec   ┌──────────┐
+│   credentials/       │────────→  │ (tmpfs, per-svc)   │───────→  │ env vars   │───────→ │ firejail │
+│   openclaw-gateway-* │  decrypt  │  openclaw-gateway-* │  cat +  │ OPENCLAW_* │ inherit │  → node  │
+│   telegram-bot-token │           │  telegram-bot-token │  export │ TELEGRAM_* │         │          │
+└──────────────────────┘           └────────────────────┘         └────────────┘         └──────────┘
+```
+
+The bash wrapper in `ExecStart` reads each credential from `$CREDENTIALS_DIRECTORY`, exports it as an environment variable, then `exec`s firejail. The `exec` replaces the bash process — the final process tree is just firejail → node. No secrets are ever written to disk as plaintext.
+
+**OpenClaw config — use `${ENV_VAR}` references instead of hardcoded secrets:**
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "botToken": "${TELEGRAM_BOT_TOKEN}"
+    }
+  },
+  "gateway": {
+    "auth": {
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    }
+  }
+}
+```
+
+OpenClaw substitutes `${...}` references with the corresponding environment variables at startup.
 
 #### How self-update works
 
