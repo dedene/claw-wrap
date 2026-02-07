@@ -224,7 +224,9 @@ func (d *Daemon) reloadConfig() error {
 
 	d.cfgMu.Lock()
 	d.cfg = newCfg
-	d.replayCache.UpdateSettings(newCfg.GetReplayCacheTTL(), newCfg.GetReplayCacheMaxEntries())
+	if d.replayCache != nil {
+		d.replayCache.UpdateSettings(newCfg.GetReplayCacheTTL(), newCfg.GetReplayCacheMaxEntries())
+	}
 	d.cfgMu.Unlock()
 	return nil
 }
