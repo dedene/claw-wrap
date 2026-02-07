@@ -1,10 +1,17 @@
-# Sandbox Setup (Firejail + OpenClaw)
+# Sandbox Setup with OpenClaw
 
-This guide covers running [OpenClaw](https://github.com/openclaw/openclaw) inside a [firejail](https://firejail.wordpress.com/) whitelist sandbox with claw-wrap providing credential access.
+This guide covers running [OpenClaw](https://github.com/openclaw/openclaw) inside a deny-by-default sandbox with claw-wrap providing credential access. Credential directories (`~/.password-store`, `~/.gnupg`, `~/.ssh`) are invisible inside the sandbox — the agent accesses CLI tools through claw-wrap symlinks, which proxy credentials from outside.
 
-In whitelist mode, everything is denied by default. Only explicitly listed paths are accessible — `~/.password-store`, `~/.gnupg`, and `~/.ssh` simply don't exist inside the sandbox. The agent accesses CLI tools through claw-wrap symlinks, which proxy credentials from outside.
+Two sandbox options are available:
 
-## Install Firejail
+- [**Firejail**](#firejail-linux) — Linux, whitelist-mode sandbox with systemd integration
+- [**nono**](#nono-macos--linux) — macOS (via Seatbelt) and Linux (via Landlock), with a built-in OpenClaw profile
+
+## Firejail (Linux)
+
+[Firejail](https://firejail.wordpress.com/) is a Linux sandbox that supports whitelist mode — everything is denied by default, only explicitly listed paths are accessible.
+
+### Install
 
 ```bash
 # Debian/Ubuntu
@@ -14,7 +21,7 @@ sudo apt install firejail
 sudo pacman -S firejail
 ```
 
-## Firejail Profile
+### Firejail Profile
 
 Create `/etc/firejail/openclaw-gateway.profile`:
 
@@ -100,7 +107,7 @@ env BASH_ENV=/home/YOUR_USERNAME/.bashrc
 
 Replace `YOUR_USERNAME` with your actual username.
 
-## What to Whitelist
+### What to Whitelist
 
 | Path | Why |
 |------|-----|
@@ -111,7 +118,7 @@ Replace `YOUR_USERNAME` with your actual username.
 | `/home/linuxbrew/.linuxbrew` | Homebrew-installed binaries (gh, gog, etc.) |
 | `/etc/ssl/certs` | HTTPS/TLS connections |
 
-## What NOT to Whitelist
+### What NOT to Whitelist
 
 | Path | Why |
 |------|-----|
@@ -120,11 +127,11 @@ Replace `YOUR_USERNAME` with your actual username.
 | `~/.ssh` | SSH keys |
 | `/etc/openclaw/wrappers.yaml` | Credential source paths — not needed inside sandbox |
 
-## Systemd Services
+### Systemd Services
 
 Three systemd units work together: the gateway service (firejailed), and a path unit that lets the gateway trigger its own restart from inside the sandbox.
 
-### openclaw-gateway.service
+#### openclaw-gateway.service
 
 ```ini
 [Unit]
@@ -159,7 +166,7 @@ WantedBy=multi-user.target
 
 Adjust the `ExecStartPre` and `SetCredentialEncrypted` lines for your own secrets, or remove them if you don't need encrypted credentials.
 
-### Self-Restart Mechanism
+#### Self-Restart Mechanism
 
 The gateway runs inside firejail and cannot call `systemctl`. But it can write to `/run/openclaw/` (whitelisted). A systemd path unit watches for a sentinel file — when the gateway touches it, systemd restarts the service from outside the sandbox.
 
@@ -193,7 +200,7 @@ ExecStart=/bin/bash -c 'rm -f /run/openclaw/restart && systemctl restart opencla
 User=root
 ```
 
-### Install the units
+#### Install the units
 
 ```bash
 sudo cp openclaw-gateway.service /etc/systemd/system/
@@ -205,7 +212,7 @@ sudo systemctl enable --now openclaw-gateway.service
 
 The path unit starts automatically with the gateway (via `WantedBy=openclaw-gateway.service`).
 
-### How self-update works
+#### How self-update works
 
 ```
 1. Gateway detects new version available
@@ -219,7 +226,7 @@ The path unit starts automatically with the gateway (via `WantedBy=openclaw-gate
 7. Gateway comes back up with the new version
 ```
 
-## PATH Priority
+### PATH Priority
 
 The claw-wrap symlinks in `/usr/local/bin` must come **before** the real binaries in PATH. Otherwise the agent calls the real `gh` directly, bypassing claw-wrap entirely.
 
@@ -239,11 +246,11 @@ The firejail profile's `env PATH=...` line already puts `/usr/local/bin` first. 
 
 This prepends `/usr/local/bin` to PATH for all tool executions, ensuring the agent always hits the claw-wrap symlink first.
 
-## Verifying Isolation
+### Verifying Isolation
 
 After the gateway is running, verify from inside the sandbox:
 
-### Credentials are invisible
+#### Credentials are invisible
 
 ```bash
 # These paths don't exist inside the sandbox
@@ -252,7 +259,7 @@ ls ~/.gnupg              # No such file or directory
 cat /etc/openclaw/wrappers.yaml  # No such file or directory
 ```
 
-### Tools work through claw-wrap
+#### Tools work through claw-wrap
 
 ```bash
 # Works — proxied through claw-wrap daemon
@@ -262,7 +269,7 @@ gh repo list
 echo $GH_TOKEN           # Empty
 ```
 
-### Socket attack is rejected
+#### Socket attack is rejected
 
 ```bash
 # Raw socket connection without HMAC — rejected
@@ -275,7 +282,7 @@ node -e "
 # Expected: {"type":"error","message":"authentication failed"}
 ```
 
-### Self-restart works
+#### Self-restart works
 
 ```bash
 # From inside the sandbox (or as the gateway user):
@@ -287,13 +294,15 @@ sudo journalctl -u openclaw-gateway -f
 
 ---
 
-## macOS: nono
+## nono (macOS / Linux)
 
-[Firejail](https://firejail.wordpress.com/) is Linux-only. For macOS, [nono](https://github.com/lukehinds/nono) provides kernel-enforced sandboxing via Apple's Seatbelt (the same technology behind App Sandbox). It's deny-by-default — sensitive paths like `~/.ssh`, `~/.gnupg`, `~/.password-store`, and `~/.aws` are blocked automatically.
+[nono](https://github.com/lukehinds/nono) provides kernel-enforced sandboxing on macOS (via Apple's Seatbelt) and Linux (via Landlock). It's deny-by-default — sensitive paths like `~/.ssh`, `~/.gnupg`, `~/.password-store`, and `~/.aws` are blocked automatically.
 
-> **Note:** nono is early alpha and has not undergone a security audit. It also works on Linux (via Landlock) as an alternative to firejail.
+nono ships with a built-in `openclaw` profile.
 
-### Install nono
+> **Note:** nono is early alpha and has not undergone a security audit.
+
+### Install
 
 ```bash
 brew install lukehinds/tap/nono
@@ -312,8 +321,6 @@ claw-wrap daemon --socket /tmp/openclaw-$(id -u)/secrets.sock
 ```
 
 ### Using the built-in profile
-
-nono ships with a built-in `openclaw` profile:
 
 ```bash
 nono run --profile openclaw -- openclaw gateway
