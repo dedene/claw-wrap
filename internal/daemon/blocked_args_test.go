@@ -259,3 +259,41 @@ func TestCheckBlockedArgs_PerArgMatching(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckBlockedArgs_CommandMode(t *testing.T) {
+	blocked := []config.BlockedArg{
+		{
+			Pattern:  `repo\s+delete`,
+			Message:  "no repo delete",
+			Match:    config.BlockedArgMatchCommand,
+			Compiled: regexp.MustCompile(`repo\s+delete`),
+		},
+	}
+
+	allowed, msg := checkBlockedArgs([]string{"repo", "delete", "my-repo"}, blocked)
+	if allowed {
+		t.Fatal("checkBlockedArgs() allowed command mode match; want blocked")
+	}
+	if msg != "no repo delete" {
+		t.Errorf("checkBlockedArgs() msg = %q, want %q", msg, "no repo delete")
+	}
+}
+
+func TestCheckBlockedArgs_InvalidMatchModeFailClosed(t *testing.T) {
+	blocked := []config.BlockedArg{
+		{
+			Pattern:  `delete`,
+			Message:  "blocked",
+			Match:    "invalid",
+			Compiled: regexp.MustCompile(`delete`),
+		},
+	}
+
+	allowed, msg := checkBlockedArgs([]string{"delete"}, blocked)
+	if allowed {
+		t.Fatal("checkBlockedArgs() allowed invalid match mode; must fail-closed")
+	}
+	if msg == "" {
+		t.Error("checkBlockedArgs() returned empty message for invalid match mode")
+	}
+}

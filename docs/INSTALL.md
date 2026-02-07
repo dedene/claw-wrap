@@ -65,6 +65,8 @@ proxy:
   max_stdin_message_size: 1MB
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
+  max_output_size: 100MB
+  max_connection_lifetime: 30m
 
 credentials:
   github-token:
@@ -124,6 +126,8 @@ sudo systemctl status claw-wrap
 claw-wrap list
 
 # Check credentials are accessible
+# Run from host/admin context (outside sandbox).
+# In strict firejail, this may fail by design.
 claw-wrap check
 
 # Test gh through claw-wrap
@@ -182,6 +186,13 @@ pass cli/github/token
 # If that works but claw-wrap check fails, the daemon's
 # GPG agent may not have the key cached:
 sudo -u <your-user> gpg --decrypt ~/.password-store/cli/github/token.gpg
+```
+
+If you use `env:` credential sources, verify the env file hardening:
+
+```bash
+sudo chown <your-user>:<your-user> /run/openclaw/env
+sudo chmod 600 /run/openclaw/env   # 640 is also accepted
 ```
 
 ### Symlink conflicts

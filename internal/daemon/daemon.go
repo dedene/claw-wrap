@@ -50,6 +50,11 @@ type Daemon struct {
 	metrics     *securityMetrics
 }
 
+var (
+	resolvePeerExecutableFunc = resolvePeerExecutable
+	resolvePeerArgv0Func      = resolvePeerArgv0
+)
+
 // Option configures the daemon.
 type Option func(*Daemon)
 
@@ -316,7 +321,7 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 	}
 
 	callerInfo := fmt.Sprintf("pid:%d", ucred.PID)
-	exe, err := resolvePeerExecutable(ucred.PID)
+	exe, err := resolvePeerExecutableFunc(ucred.PID)
 	if err != nil {
 		if cfg.DenyUnverifiedCallerExe() {
 			d.metrics.Inc("caller_verify_fail")
@@ -339,7 +344,7 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 
 	switch {
 	case rawRequest["admin"] != nil:
-		d.handleAdminRequest(conn, payload, cfg, ucred.UID)
+		d.handleAdminRequest(conn, payload, cfg, ucred.UID, ucred.PID)
 	case isProxy:
 		d.handleProxyRequest(conn, payload, cfg, callerInfo, ucred.UID)
 	default:
@@ -347,7 +352,7 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 	}
 }
 
-func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Config, uid uint32) {
+func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Config, uid uint32, pid int32) {
 	var req protocol.AdminRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		d.sendError(conn, "invalid request")
@@ -373,6 +378,15 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 		log.Printf("[WARN] deny reason=replay admin=%s", req.Admin)
 		d.sendError(conn, "authentication failed")
 		return
+	}
+
+	if req.Admin == "check" {
+		if err := d.authorizeAdminCheckCaller(pid); err != nil {
+			d.metrics.Inc("caller_verify_fail")
+			log.Printf("[WARN] deny reason=check_gate pid=%d err=%v", pid, err)
+			d.sendError(conn, "authentication failed")
+			return
+		}
 	}
 
 	switch req.Admin {
@@ -403,6 +417,25 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 		log.Printf("[WARN] unknown admin command: %s", req.Admin)
 		d.sendError(conn, "unknown admin command")
 	}
+}
+
+func (d *Daemon) authorizeAdminCheckCaller(pid int32) error {
+	exe, err := resolvePeerExecutableFunc(pid)
+	if err != nil {
+		return fmt.Errorf("resolve caller executable: %w", err)
+	}
+	if !d.isAllowedBinary(exe) {
+		return fmt.Errorf("caller executable not allowed: %q", exe)
+	}
+
+	argv0, err := resolvePeerArgv0Func(pid)
+	if err != nil {
+		return fmt.Errorf("resolve caller argv0: %w", err)
+	}
+	if filepath.Base(argv0) != "claw-wrap" {
+		return fmt.Errorf("unexpected caller argv0 %q", argv0)
+	}
+	return nil
 }
 
 func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Config, callerInfo string, uid uint32) {
@@ -474,26 +507,39 @@ func checkBlockedArgs(args []string, blocked []config.BlockedArg) (bool, string)
 		return true, ""
 	}
 
+	joinedArgs := strings.Join(args, " ")
+
 	for _, b := range blocked {
 		if b.Compiled == nil {
 			log.Printf("[ERROR] nil compiled pattern for %q - fail-closed", b.Pattern)
 			return false, "internal error: invalid security pattern"
 		}
-		// Match each arg individually to prevent bypass via embedded spaces.
-		// Previously used strings.Join(args, " ") which allowed an attacker
-		// to smuggle patterns across arg boundaries.
-		for _, arg := range args {
-			if b.Compiled.MatchString(arg) {
-				msg := b.Message
-				if msg == "" {
-					msg = "operation blocked by security policy"
+
+		switch b.Match {
+		case "", config.BlockedArgMatchArg:
+			for _, arg := range args {
+				if b.Compiled.MatchString(arg) {
+					return false, blockedArgMessage(b.Message)
 				}
-				return false, msg
 			}
+		case config.BlockedArgMatchCommand:
+			if b.Compiled.MatchString(joinedArgs) {
+				return false, blockedArgMessage(b.Message)
+			}
+		default:
+			log.Printf("[ERROR] invalid blocked_args match mode %q - fail-closed", b.Match)
+			return false, "internal error: invalid security pattern"
 		}
 	}
 
 	return true, ""
+}
+
+func blockedArgMessage(msg string) string {
+	if msg == "" {
+		return "operation blocked by security policy"
+	}
+	return msg
 }
 
 // yamlEscapeValue wraps a credential value in single quotes for safe YAML

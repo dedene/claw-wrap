@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/daemon"
@@ -26,6 +27,7 @@ import (
 )
 
 var version = "dev"
+var safeToolNameRegex = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func main() {
 	execName := filepath.Base(os.Args[0])
@@ -203,6 +205,12 @@ func runInstall() error {
 
 	var installed, failed int
 	for toolName := range cfg.Tools {
+		if !safeToolNameRegex.MatchString(toolName) {
+			fmt.Printf("  %-12s FAILED (invalid tool name)\n", toolName)
+			failed++
+			continue
+		}
+
 		linkPath := filepath.Join(installDir, toolName)
 
 		// Remove existing file/symlink

@@ -90,7 +90,8 @@ type ToolDef struct {
 type BlockedArg struct {
 	Pattern  string         `yaml:"pattern"`
 	Message  string         `yaml:"message"`
-	Compiled *regexp.Regexp `yaml:"-"` // compiled at validation time
+	Match    string         `yaml:"match,omitempty"` // arg (default) or command
+	Compiled *regexp.Regexp `yaml:"-"`               // compiled at validation time
 }
 
 // ConfigFileDef defines a temporary config file to generate.
@@ -101,7 +102,17 @@ type ConfigFileDef struct {
 	Credentials []string `yaml:"credentials"`
 }
 
-var envVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+const (
+	// BlockedArgMatchArg matches each arg independently (default, safer).
+	BlockedArgMatchArg = "arg"
+	// BlockedArgMatchCommand matches against strings.Join(args, " ").
+	BlockedArgMatchCommand = "command"
+)
+
+var (
+	envVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	toolNameRegex   = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+)
 
 // Load reads and parses the configuration from the given path.
 func Load(path string) (*Config, error) {
@@ -138,6 +149,10 @@ func (c *Config) Validate() error {
 	}
 
 	for toolName, tool := range c.Tools {
+		if !toolNameRegex.MatchString(toolName) {
+			return fmt.Errorf("tool %q: invalid name (allowed: letters, digits, dot, underscore, hyphen)", toolName)
+		}
+
 		// Binary must be non-empty and absolute.
 		if tool.Binary == "" {
 			return fmt.Errorf("tool %q: empty binary path", toolName)
@@ -180,10 +195,21 @@ func (c *Config) Validate() error {
 
 		// Compile blocked_args regex patterns.
 		for i, b := range tool.BlockedArgs {
+			matchMode := strings.TrimSpace(b.Match)
+			if matchMode == "" {
+				matchMode = BlockedArgMatchArg
+			}
+			switch matchMode {
+			case BlockedArgMatchArg, BlockedArgMatchCommand:
+			default:
+				return fmt.Errorf("tool %q: invalid blocked_args match %q (must be %q or %q)", toolName, b.Match, BlockedArgMatchArg, BlockedArgMatchCommand)
+			}
+
 			re, err := regexp.Compile(b.Pattern)
 			if err != nil {
 				return fmt.Errorf("tool %q: invalid blocked_args pattern %q: %w", toolName, b.Pattern, err)
 			}
+			c.Tools[toolName].BlockedArgs[i].Match = matchMode
 			c.Tools[toolName].BlockedArgs[i].Compiled = re
 		}
 	}

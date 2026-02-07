@@ -35,6 +35,57 @@ func TestValidate_ValidBlockedArgs(t *testing.T) {
 	}
 }
 
+func TestValidate_BlockedArgsMatchModes(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				BlockedArgs: []BlockedArg{
+					{Pattern: `repo\s+delete`, Match: BlockedArgMatchCommand},
+					{Pattern: `--force`, Match: BlockedArgMatchArg},
+					{Pattern: `delete`}, // default should normalize to arg
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+
+	tool := cfg.Tools["gh"]
+	if tool.BlockedArgs[0].Match != BlockedArgMatchCommand {
+		t.Errorf("BlockedArgs[0].Match = %q, want %q", tool.BlockedArgs[0].Match, BlockedArgMatchCommand)
+	}
+	if tool.BlockedArgs[1].Match != BlockedArgMatchArg {
+		t.Errorf("BlockedArgs[1].Match = %q, want %q", tool.BlockedArgs[1].Match, BlockedArgMatchArg)
+	}
+	if tool.BlockedArgs[2].Match != BlockedArgMatchArg {
+		t.Errorf("BlockedArgs[2].Match = %q, want default %q", tool.BlockedArgs[2].Match, BlockedArgMatchArg)
+	}
+}
+
+func TestValidate_BlockedArgsInvalidMatchMode(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				BlockedArgs: []BlockedArg{
+					{Pattern: `repo\s+delete`, Match: "all"},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for invalid blocked_args match mode")
+	}
+	if !strings.Contains(err.Error(), "invalid blocked_args match") {
+		t.Errorf("error = %q, want invalid match mode error", err.Error())
+	}
+}
+
 func TestValidate_InvalidBlockedArgs(t *testing.T) {
 	cfg := Config{
 		Tools: map[string]ToolDef{
@@ -127,6 +178,32 @@ func TestValidate_MultipleToolsMixedValidity(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "npm") {
 		t.Errorf("error %q does not mention offending tool", err.Error())
+	}
+}
+
+func TestValidate_InvalidToolName(t *testing.T) {
+	tests := []string{
+		"../../etc/passwd",
+		"gh/repo",
+		"gh repo",
+		"gh;rm",
+	}
+
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := Config{
+				Tools: map[string]ToolDef{
+					name: {Binary: "/usr/bin/gh"},
+				},
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() returned nil, want error for invalid tool name %q", name)
+			}
+			if !strings.Contains(err.Error(), "invalid name") {
+				t.Errorf("error = %q, want invalid name", err.Error())
+			}
+		})
 	}
 }
 

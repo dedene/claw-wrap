@@ -138,7 +138,10 @@ Supported signals: SIGINT, SIGTERM, SIGHUP
 
 ### 3.5 Admin Requests
 
-Admin commands (`list`, `check`) use the same NDJSON format with nonce:
+Admin commands (`list`, `check`) use the same NDJSON format with nonce.
+`check` is additionally gated by caller executable path allowlist and caller
+argv0 (`claw-wrap`). This is a best-effort admin-only control and can reject
+requests when peer process metadata is unreadable (common in strict sandboxes):
 
 ```json
 {"version": 3, "admin": "list", "timestamp": "...", "hmac": "...", "nonce": "..."}
@@ -204,7 +207,7 @@ Credential values are single-quoted in YAML templates to prevent special charact
 - Malicious code in sandbox extracting credentials
 - Replay attacks (nonce + replay cache + 5-second window)
 - Request tampering (HMAC covers args/cwd/env/nonce with field separators)
-- Unauthorized tool operations (blocked_args, per-argument matching)
+- Unauthorized tool operations (blocked_args with `arg`/`command` match modes)
 - Environment variable injection (comprehensive denylist)
 - YAML template injection (values single-quoted/escaped)
 - Path traversal (absolute CWD validation, symlink checks on secret files)
@@ -222,7 +225,7 @@ Credential values are single-quoted in YAML templates to prevent special charact
 2. **Binary allowlist**: Caller exe path checked via /proc/PID/exe
 3. **HMAC authentication**: Field-separated signature with per-request nonce
 4. **Replay cache**: Duplicate requests rejected (UID-scoped, min 10s TTL)
-5. **Blocked args**: Server-side command restrictions (per-argument matching)
+5. **Blocked args**: Server-side command restrictions (`arg` default, `command` opt-in)
 6. **Forced env**: Agent cannot override security settings
 7. **No credential exposure**: Credentials never enter sandbox
 8. **Process isolation**: Tools in separate process groups

@@ -32,6 +32,7 @@ tools:
       GH_TOKEN: github-token
     blocked_args:
       - pattern: "repo\\s+delete"
+        match: command
         message: "Repository deletion is blocked"
 ```
 
@@ -91,8 +92,10 @@ tools:
       GOG_ENABLE_COMMANDS: "gmail,calendar,drive,tasks,contacts,keep,time"
     blocked_args:
       - pattern: "gmail\\s+(send|delete|trash)"
+        match: command
         message: "Email send/delete operations are blocked"
       - pattern: "drive\\s+(delete|trash|remove)"
+        match: command
         message: "Drive delete operations are blocked"
 
   # Config file injection
@@ -200,6 +203,8 @@ security:
 Default is `false`: if caller executable resolution fails (e.g. inside firejail),
 the request is still allowed — HMAC auth + UID check provide sufficient security.
 Set to `true` to reject connections when `/proc/<pid>/exe` is unreadable (opt-in hardening).
+In firejail deployments this can fail closed unexpectedly depending on host `/proc`
+policy (`hidepid`, ptrace restrictions), so test carefully before enabling.
 
 ## Credential Sources
 
@@ -223,7 +228,19 @@ credentials:
 
 Reads from `/run/openclaw/env` file (used for systemd credentials).
 
+Security requirements for `/run/openclaw/env`:
+- Must be a regular file (symlinks are rejected)
+- Must be owned by the daemon user
+- Mode must be `0600` or `0640`
+
 ## Tool Options
+
+### Tool names
+
+Tool names (the keys under `tools:`) must match:
+`[A-Za-z0-9._-]+`
+
+This prevents path traversal and unsafe names during symlink installation.
 
 ### `binary` (required)
 
@@ -274,7 +291,10 @@ tools:
 
 ### `blocked_args` (optional)
 
-List of regex patterns that block certain arguments. Each pattern is matched against each individual argument — patterns cannot match across argument boundaries.
+List of regex patterns that block certain arguments.
+Each entry supports optional `match` mode:
+- `arg` (default): pattern is matched against each argument independently
+- `command`: pattern is matched against `strings.Join(args, " ")`
 
 ```yaml
 tools:
@@ -282,7 +302,11 @@ tools:
     binary: /usr/local/bin/mytool
     blocked_args:
       - pattern: "delete"
+        match: arg
         message: "Delete is not allowed"
+      - pattern: "repo\\s+delete"
+        match: command
+        message: "Repo delete blocked"
       - pattern: "--force"
         message: "Force flag blocked"
 ```
@@ -330,12 +354,12 @@ Credential values are automatically YAML-escaped using single-quote wrapping bef
 
 ## Security Notes
 
-1. **Blocked args are enforced server-side** — the agent cannot bypass them; patterns match per-argument
+1. **Blocked args are enforced server-side** — default `arg` mode is per-argument; use `match: command` for cross-arg patterns
 2. **Forced env vars cannot be overridden** — stripped from inherited environment
 3. **Config file paths are validated** — absolute/traversal paths are rejected
 4. **Config file is in a temp directory** — created with restrictive umask (0600), cleaned up after tool exits; stale dirs swept on daemon startup
 5. **Socket requires UID match** — only the configured user can connect
-6. **Binary path is verified** — by default executable resolution is fail-closed
+6. **Binary path verification is best-effort by default** — set `deny_unverified_caller_exe: true` for strict mode (may require `/proc` tuning in firejail)
 7. **Requests are replay-protected** — duplicate HMACs within TTL are rejected; nonce included in HMAC (protocol v3)
 8. **Error messages are sanitized** — internal paths, versions, and tool names are not leaked to the client
 9. **Environment denylist** — dangerous env vars (LD_*, DYLD_*, proxy vars, language runtime vars, git hijack vars) are stripped
@@ -343,3 +367,5 @@ Credential values are automatically YAML-escaped using single-quote wrapping bef
 11. **Working directory must be absolute** — relative paths are rejected
 12. **Secret file symlink protection** — WriteSecret/LoadSecret refuse to operate on symlinks
 13. **pass binary must be absolute path** — relative paths fall back to default with a warning
+14. **Environment credential file hardening** — `/run/openclaw/env` must be regular file, owned by daemon user, and mode `0600`/`0640`
+15. **Tool names are validated** — only `[A-Za-z0-9._-]+` to prevent unsafe symlink install paths

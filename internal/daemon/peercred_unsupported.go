@@ -16,3 +16,8 @@ func resolvePeerExecutable(pid int32) (string, error) {
 	_ = pid
 	return "", fmt.Errorf("peer executable resolution is unsupported on this platform")
 }
+
+func resolvePeerArgv0(pid int32) (string, error) {
+	_ = pid
+	return "", fmt.Errorf("peer argv0 resolution is unsupported on this platform")
+}

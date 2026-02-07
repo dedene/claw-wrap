@@ -77,3 +77,48 @@ func resolvePeerExecutable(pid int32) (string, error) {
 	}
 	return exe, nil
 }
+
+func resolvePeerArgv0(pid int32) (string, error) {
+	raw, err := unix.SysctlRaw("kern.procargs2", int(pid))
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < 4 {
+		return "", fmt.Errorf("invalid procargs payload")
+	}
+
+	_ = binary.LittleEndian.Uint32(raw[:4]) // argc, not required for extracting argv0
+	data := raw[4:]
+
+	// Skip executable path.
+	start := 0
+	for start < len(data) && data[start] == 0 {
+		start++
+	}
+	if start >= len(data) {
+		return "", fmt.Errorf("missing executable path")
+	}
+	endRel := bytes.IndexByte(data[start:], 0)
+	if endRel < 0 {
+		return "", fmt.Errorf("unterminated executable path")
+	}
+	pos := start + endRel
+
+	// Skip NUL padding between executable path and argv entries.
+	for pos < len(data) && data[pos] == 0 {
+		pos++
+	}
+	if pos >= len(data) {
+		return "", fmt.Errorf("missing argv0")
+	}
+
+	argvEndRel := bytes.IndexByte(data[pos:], 0)
+	if argvEndRel < 0 {
+		return "", fmt.Errorf("unterminated argv0")
+	}
+	argv0 := string(data[pos : pos+argvEndRel])
+	if argv0 == "" {
+		return "", fmt.Errorf("empty argv0")
+	}
+	return argv0, nil
+}

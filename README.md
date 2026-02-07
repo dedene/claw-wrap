@@ -107,6 +107,8 @@ proxy:
   max_stdin_message_size: 1MB
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
+  max_output_size: 100MB
+  max_connection_lifetime: 30m
 
 credentials:
   github-token:
@@ -141,7 +143,7 @@ This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wr
 
 ```bash
 claw-wrap list      # Should show gh
-claw-wrap check     # Should show credentials OK
+claw-wrap check     # Should show credentials OK (run from host/admin context)
 gh repo list        # Should work — using proxied credentials
 ```
 
@@ -161,14 +163,19 @@ tools:
       GH_TOKEN: github-token
     blocked_args:
       - pattern: "repo\\s+delete"
+        match: command
         message: "Repository deletion is blocked"
       - pattern: "repo\\s+create"
+        match: command
         message: "Repository creation is blocked"
       - pattern: "auth\\s+"
+        match: command
         message: "Auth commands are blocked"
       - pattern: "ssh-key"
         message: "SSH key management is blocked"
 ```
+
+By default, blocked patterns run in `arg` mode (each argument is matched independently). Use `match: command` when a regex needs to span multiple args (for example `repo\\s+delete`).
 
 ### Forced environment variables
 

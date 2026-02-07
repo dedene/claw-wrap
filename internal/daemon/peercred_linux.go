@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -48,4 +49,21 @@ func resolvePeerExecutable(pid int32) (string, error) {
 		return "", fmt.Errorf("empty executable path")
 	}
 	return exe, nil
+}
+
+func resolvePeerArgv0(pid int32) (string, error) {
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return "", err
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("empty cmdline")
+	}
+
+	argv0, _, _ := bytes.Cut(data, []byte{0})
+	if len(argv0) == 0 {
+		return "", fmt.Errorf("empty argv0")
+	}
+	return string(argv0), nil
 }

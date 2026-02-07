@@ -104,6 +104,10 @@ func TestFetch_LegacyFormat(t *testing.T) {
 }
 
 func TestFetch_EnvPrefix_MissingFile(t *testing.T) {
+	orig := DefaultEnvFile
+	DefaultEnvFile = filepath.Join(t.TempDir(), "missing-env-file")
+	defer func() { DefaultEnvFile = orig }()
+
 	// env: prefix routes to fetchFromEnvFile which reads DefaultEnvFile.
 	// When that file doesn't exist, we expect an error.
 	_, err := Fetch("env:MY_VAR")
@@ -186,12 +190,18 @@ func TestFetchFromPass_TrimsWhitespace(t *testing.T) {
 }
 
 func TestFetchFromEnvFile_VarNotFound(t *testing.T) {
-	// fetchFromEnvFile reads DefaultEnvFile which likely doesn't exist in test.
-	// This is effectively the same as TestFetch_EnvPrefix_MissingFile but
-	// exercises the unexported function directly.
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte("OTHER=123\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	orig := DefaultEnvFile
+	DefaultEnvFile = envFile
+	defer func() { DefaultEnvFile = orig }()
+
 	_, err := fetchFromEnvFile("NONEXISTENT_VAR")
 	if err == nil {
-		t.Fatal("fetchFromEnvFile() returned nil error when env file missing")
+		t.Fatal("fetchFromEnvFile() returned nil error when env var is missing")
 	}
 }
 
@@ -226,5 +236,86 @@ echo "custom-result"
 	invokedBinary := strings.TrimSpace(string(marker))
 	if invokedBinary != scriptPath {
 		t.Errorf("invoked binary = %q, want absolute path %q", invokedBinary, scriptPath)
+	}
+}
+
+func TestFetchFromEnvFile_ValidPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte("MY_TOKEN=abc123\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	orig := DefaultEnvFile
+	DefaultEnvFile = envFile
+	defer func() { DefaultEnvFile = orig }()
+
+	value, err := fetchFromEnvFile("MY_TOKEN")
+	if err != nil {
+		t.Fatalf("fetchFromEnvFile() error = %v", err)
+	}
+	if value != "abc123" {
+		t.Errorf("fetchFromEnvFile() = %q, want %q", value, "abc123")
+	}
+}
+
+func TestValidateEnvFile_RejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	realPath := filepath.Join(tmpDir, "real-env")
+	if err := os.WriteFile(realPath, []byte("TOKEN=x\n"), 0o600); err != nil {
+		t.Fatalf("write real env file: %v", err)
+	}
+
+	linkPath := filepath.Join(tmpDir, "env-link")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	if err := validateEnvFile(linkPath); err == nil {
+		t.Fatal("validateEnvFile() returned nil for symlink")
+	}
+}
+
+func TestValidateEnvFile_RejectsNonRegularFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := validateEnvFile(tmpDir); err == nil {
+		t.Fatal("validateEnvFile() returned nil for directory")
+	}
+}
+
+func TestValidateEnvFile_RejectsBroadPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte("TOKEN=x\n"), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	if err := validateEnvFile(envFile); err == nil {
+		t.Fatal("validateEnvFile() returned nil for broad permissions")
+	}
+}
+
+func TestValidateEnvFile_Allows0640(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte("TOKEN=x\n"), 0o640); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	if err := validateEnvFile(envFile); err != nil {
+		t.Fatalf("validateEnvFile() error = %v, want nil for 0640", err)
+	}
+}
+
+func TestValidateEnvFile_RejectsOwnerMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte("TOKEN=x\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	orig := currentEUIDFunc
+	currentEUIDFunc = func() int { return orig() + 1 }
+	defer func() { currentEUIDFunc = orig }()
+
+	if err := validateEnvFile(envFile); err == nil {
+		t.Fatal("validateEnvFile() returned nil for owner mismatch")
 	}
 }
