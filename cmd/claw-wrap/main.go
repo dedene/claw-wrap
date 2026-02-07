@@ -209,7 +209,7 @@ Commands:
   help       Show this help
 
 Examples:
-  claw-wrap daemon         # Start daemon (replaces Python daemon)
+  claw-wrap daemon         # Start daemon
   claw-wrap list           # Show tools
   sudo claw-wrap install   # Create symlinks
   bird whoami              # Run bird with credentials (via symlink)

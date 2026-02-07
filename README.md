@@ -1,88 +1,196 @@
 <div align="center">
   <img src="docs/assets/claw-wrap-hero.png" width="160" alt="claw-wrap lobster in a burrito" />
   <h1>claw-wrap</h1>
-  <p>A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes - credentials never enter the sandbox.</p>
+  <p>A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes — credentials never enter the sandbox.</p>
   <p>
     <a href="docs/INSTALL.md">Install</a> ·
     <a href="docs/CONFIG.md">Config</a> ·
-    <a href="docs/SPEC.md">Protocol</a> ·
-    <a href="docs/MIGRATION.md">Migration</a>
+    <a href="docs/SANDBOX.md">Sandbox</a> ·
+    <a href="docs/SPEC.md">Protocol</a>
   </p>
 </div>
 
 ---
 
-## Features
+## The Problem
 
-- **Proxy execution** - Daemon executes tools and streams output; credentials never enter sandbox
-- **Single binary** - Both wrapper and daemon in one executable
-- **Symlink-based** - Tools like `bird`, `gog`, `gh` are symlinks to `claw-wrap`
-- **HMAC authentication** - Requests are signed to prevent unauthorized access
-- **Firejail compatible** - Designed for sandboxed environments
-- **Multiple credential sources** - `pass` (password store) and env file
-- **Blocked args** - Regex patterns to block dangerous operations
-- **Forced env vars** - Variables that cannot be overridden
-- **Config file injection** - For tools that need config files instead of env vars
+You're running an AI agent in a sandbox. The agent needs to call `gh` to interact with GitHub — list repos, read issues, check PRs. So you give it your `GH_TOKEN`.
 
-## Architecture
+Now the agent has full access to your GitHub account. It can read private repos, push code, delete repositories, create tokens. Any process in the sandbox can grab the token from the environment. One prompt injection and your credentials are exfiltrated.
+
+**claw-wrap solves this.** The agent calls `gh repo list` like normal, but:
+
+1. `gh` is actually a symlink to `claw-wrap`
+2. claw-wrap connects to a daemon running **outside** the sandbox
+3. The daemon injects credentials, executes `gh`, and streams the output back
+4. The agent gets the results. The token never enters the sandbox.
+
+You can also block dangerous commands server-side — the agent can `gh repo list` but not `gh repo delete`.
+
+## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ FIREJAIL SANDBOX                                        │
+│ SANDBOX (firejail)                                      │
 │                                                         │
-│  agent calls "gog gmail list"                           │
+│  agent calls "gh repo list"                             │
 │         ↓                                               │
-│  claw-wrap wrapper:                                     │
+│  /usr/local/bin/gh → claw-wrap (symlink)                │
 │    1. Reads HMAC secret from /run/openclaw/auth         │
 │    2. Signs request with timestamp                      │
-│    3. Sends to daemon, relays stdin/stdout/stderr       │
+│    3. Sends to daemon via Unix socket                   │
+│    4. Streams stdout/stderr back to agent               │
 │         ↓                                               │
 └─────────│───────────────────────────────────────────────┘
           │ Unix socket (/run/openclaw/secrets.sock)
           ↓
 ┌─────────────────────────────────────────────────────────┐
 │ claw-wrap daemon (outside sandbox)                      │
-│  1. Verifies HMAC signature and timestamp               │
-│  2. Validates args against blocked_args patterns        │
-│  3. Fetches credentials from pass                       │
-│  4. Spawns tool with credentials in environment         │
-│  5. Streams stdout/stderr back to wrapper               │
+│  1. Verifies HMAC signature + timestamp                 │
+│  2. Checks args against blocked patterns                │
+│  3. Fetches GH_TOKEN from pass (password store)         │
+│  4. Spawns real gh binary with token in environment     │
+│  5. Streams stdout/stderr back through socket           │
 │                                                         │
 │  ⚠️  Credentials NEVER leave the daemon process         │
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Installation
+## Quick Start
 
-### Homebrew (Linux)
+This example sets up `gh` (GitHub CLI) as a proxied tool.
+
+### Prerequisites
+
+- Linux with systemd
+- [pass](https://www.passwordstore.org/) (password store) with GPG configured
+- `gh` installed somewhere (e.g. via Homebrew: `brew install gh`)
+
+### 1. Install claw-wrap
 
 ```bash
 brew install dedene/tap/claw-wrap
 ```
 
-### From source
+Or from source:
 
 ```bash
+git clone https://github.com/dedene/claw-wrap.git
+cd claw-wrap
 make build
 sudo make install
 ```
 
-### Setup
+### 2. Store your GitHub token in pass
 
 ```bash
-# Install systemd service
+# If you haven't initialized pass yet:
+gpg --gen-key
+pass init <your-gpg-key-id>
+
+# Store the token
+pass insert cli/github/token
+```
+
+### 3. Create the config
+
+Create `/etc/openclaw/wrappers.yaml`:
+
+```yaml
+proxy:
+  timeout: 300s
+  inline_threshold: 1MB
+  hmac_secret_file: /run/openclaw/auth
+
+credentials:
+  github-token:
+    source: pass:cli/github/token
+
+tools:
+  gh:
+    binary: /home/linuxbrew/.linuxbrew/bin/gh   # path to real gh binary
+    env:
+      GH_TOKEN: github-token
+```
+
+### 4. Start the daemon
+
+```bash
 sudo cp init/claw-wrap.service /etc/systemd/system/
+# Edit the service file: set User= to your username
 sudo systemctl daemon-reload
 sudo systemctl enable --now claw-wrap
-
-# Create tool symlinks
-sudo claw-wrap install
-
-# Verify
-claw-wrap list
-claw-wrap check
-bird whoami
 ```
+
+### 5. Create the symlink
+
+```bash
+sudo claw-wrap install
+```
+
+This creates `/usr/local/bin/gh → /usr/local/bin/claw-wrap`.
+
+### 6. Verify
+
+```bash
+claw-wrap list      # Should show gh
+claw-wrap check     # Should show credentials OK
+gh repo list        # Should work — using proxied credentials
+```
+
+## Safety Controls
+
+claw-wrap doesn't just proxy credentials — it enforces what the agent can do with them.
+
+### Blocked arguments
+
+Reject commands that match regex patterns. The agent gets an error, the command never runs:
+
+```yaml
+tools:
+  gh:
+    binary: /home/linuxbrew/.linuxbrew/bin/gh
+    env:
+      GH_TOKEN: github-token
+    blocked_args:
+      - pattern: "repo\\s+delete"
+        message: "Repository deletion is blocked"
+      - pattern: "repo\\s+create"
+        message: "Repository creation is blocked"
+      - pattern: "auth\\s+"
+        message: "Auth commands are blocked"
+      - pattern: "ssh-key"
+        message: "SSH key management is blocked"
+```
+
+### Forced environment variables
+
+Variables that are always set and cannot be overridden by the agent:
+
+```yaml
+tools:
+  gog:
+    binary: /home/linuxbrew/.linuxbrew/bin/gog
+    env:
+      GOG_KEYRING_PASSWORD: gog-keyring-password
+    forced_env:
+      GOG_ENABLE_COMMANDS: "gmail,calendar,drive,tasks,contacts,keep,time"
+```
+
+The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited environment and set by the daemon.
+
+## Sandbox Setup
+
+claw-wrap is designed to work with [firejail](https://firejail.wordpress.com/) in **whitelist mode** (deny-by-default). The sandbox can access `/run/openclaw` (socket + auth file) but NOT `~/.password-store`, `~/.gnupg`, or `~/.ssh`.
+
+See [docs/SANDBOX.md](docs/SANDBOX.md) for a complete firejail setup guide with an annotated example profile.
+
+## Documentation
+
+- [Installation Guide](docs/INSTALL.md) — full setup with `pass`, systemd, and troubleshooting
+- [Configuration Reference](docs/CONFIG.md) — all options for credentials, tools, blocked args, config file injection
+- [Sandbox Setup](docs/SANDBOX.md) — firejail whitelist profile with verification steps
+- [Protocol Specification](docs/SPEC.md) — HMAC authentication, message framing, proxy protocol
 
 ## Usage
 
@@ -98,92 +206,28 @@ claw-wrap version   # Show version
 claw-wrap help      # Show help
 
 # Tool execution (via symlinks)
-bird whoami
-gog gmail list
 gh repo list
-openhue get lights
-```
-
-## Documentation
-
-- [Installation Guide](docs/INSTALL.md)
-- [Configuration Reference](docs/CONFIG.md)
-- [Protocol Specification](docs/SPEC.md)
-- [Migration Guide](docs/MIGRATION.md)
-
-## Quick Configuration Example
-
-`/etc/openclaw/wrappers.yaml`:
-
-```yaml
-credentials:
-  my-api-key:
-    source: pass:cli/myapp/api-key
-
-tools:
-  myapp:
-    binary: /usr/local/bin/myapp
-    env:
-      API_KEY: my-api-key
-    blocked_args:
-      - pattern: "delete\\s+--force"
-        message: "Force delete is blocked"
-```
-
-See [docs/CONFIG.md](docs/CONFIG.md) for full reference.
-
-## Security Model
-
-1. **Proxy execution** - Credentials never enter the sandbox; daemon executes tools directly
-2. **HMAC authentication** - Requests must be signed with a shared secret
-3. **Timestamp freshness** - Requests expire after 5 seconds to prevent replay attacks
-4. **UID verification** - Only requests from the allowed UID are accepted
-5. **Blocked args** - Dangerous operations are rejected server-side
-6. **Forced env vars** - Agent cannot override security-critical variables
-7. **No config in sandbox** - `/etc/openclaw/wrappers.yaml` is not accessible inside firejail
-
-## Project Structure
-
-```
-claw-wrap/
-├── cmd/claw-wrap/main.go      # Entry point
-├── internal/
-│   ├── auth/                  # HMAC authentication
-│   ├── config/                # YAML config loading
-│   ├── credentials/           # pass/env credential fetching
-│   ├── daemon/                # Socket server + tool executor
-│   ├── framing/               # Length-prefixed message encoding
-│   ├── protocol/              # Request/response types
-│   └── wrapper/               # I/O relay client
-├── init/
-│   └── claw-wrap.service      # Systemd unit file
-├── docs/                      # Documentation
-├── go.mod
-├── Makefile
-└── README.md
+gh issue list
+gh pr view 42
 ```
 
 ## Building
 
 ```bash
-make build              # Build to ./build/claw-wrap
-make install            # Install to /usr/local/bin
-make install-symlinks   # Install + create symlinks
-make test               # Run tests
-make fmt                # Format code
-make lint               # Run go vet
-make clean              # Remove build artifacts
+make build    # Build to ./build/claw-wrap
+make test     # Run tests
+make install  # Install to /usr/local/bin
+make fmt      # Format code
+make lint     # Run go vet
+make clean    # Remove build artifacts
 ```
 
 ## Requirements
 
-- Go 1.21+
-- `pass` (password-store)
-- GPG (for pass decryption)
-
-## CI
-
-GitHub Actions runs `make test` on `ubuntu-latest` for pushes and PRs to `main`.
+- Go 1.21+ (building from source)
+- Linux with systemd
+- `pass` (password-store) + GPG
+- [firejail](https://firejail.wordpress.com/) (recommended)
 
 ## License
 

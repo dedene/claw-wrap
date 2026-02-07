@@ -2,6 +2,30 @@
 
 claw-wrap reads its configuration from `/etc/openclaw/wrappers.yaml`.
 
+## Minimal Example
+
+A single tool (`gh`) with one credential:
+
+```yaml
+proxy:
+  timeout: 300s
+  inline_threshold: 1MB
+  hmac_secret_file: /run/openclaw/auth
+
+credentials:
+  github-token:
+    source: pass:cli/github/token
+
+tools:
+  gh:
+    binary: /home/linuxbrew/.linuxbrew/bin/gh
+    env:
+      GH_TOKEN: github-token
+    blocked_args:
+      - pattern: "repo\\s+delete"
+        message: "Repository deletion is blocked"
+```
+
 ## Full Example
 
 ```yaml
