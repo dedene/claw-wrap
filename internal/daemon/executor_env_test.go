@@ -1,5 +1,3 @@
-//go:build linux
-
 package daemon
 
 import (
@@ -23,10 +21,24 @@ func envContains(env []string, key string) (string, bool) {
 
 func TestIsDeniedEnvVar_ExactMatch(t *testing.T) {
 	denied := []string{
-		"LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV",
-		"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
-		"PYTHONPATH", "PYTHONSTARTUP", "PERL5LIB", "RUBYLIB", "NODE_OPTIONS",
+		// Shell injection
+		"BASH_ENV", "ENV", "CDPATH", "SHELLOPTS", "BASHOPTS", "SHELL", "IFS",
+		"GLOBIGNORE", "PROMPT_COMMAND",
+		// Language runtimes
+		"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+		"PERL5LIB", "PERL5OPT", "RUBYLIB", "RUBYOPT",
+		"NODE_OPTIONS", "NODE_PATH",
+		"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JAVA_OPTIONS",
+		// Execution hijack
 		"GIT_SSH_COMMAND", "EDITOR", "VISUAL", "PAGER",
+		// Proxy vars
+		"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+		"ftp_proxy", "FTP_PROXY", "all_proxy", "ALL_PROXY",
+		"no_proxy", "NO_PROXY",
+		// Misc dangerous
+		"CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+		"GIT_PROXY_COMMAND", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+		"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR",
 	}
 
 	for _, key := range denied {
@@ -43,9 +55,22 @@ func TestIsDeniedEnvVar_PrefixMatch(t *testing.T) {
 		name string
 		key  string
 	}{
-		{"exact prefix", "BASH_FUNC_"},
-		{"function export", "BASH_FUNC_myfunc%%"},
-		{"nested name", "BASH_FUNC_some_helper%%"},
+		// BASH_FUNC_ prefix
+		{"bash_func prefix", "BASH_FUNC_"},
+		{"bash function export", "BASH_FUNC_myfunc%%"},
+		{"bash nested name", "BASH_FUNC_some_helper%%"},
+		// LD_ prefix
+		{"LD_PRELOAD", "LD_PRELOAD"},
+		{"LD_LIBRARY_PATH", "LD_LIBRARY_PATH"},
+		{"LD_AUDIT", "LD_AUDIT"},
+		{"LD_DEBUG", "LD_DEBUG"},
+		{"LD_BIND_NOW", "LD_BIND_NOW"},
+		// DYLD_ prefix
+		{"DYLD_INSERT_LIBRARIES", "DYLD_INSERT_LIBRARIES"},
+		{"DYLD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"},
+		{"DYLD_FRAMEWORK_PATH", "DYLD_FRAMEWORK_PATH"},
+		{"DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"},
+		{"DYLD_FORCE_FLAT_NAMESPACE", "DYLD_FORCE_FLAT_NAMESPACE"},
 	}
 
 	for _, tc := range cases {
@@ -61,7 +86,7 @@ func TestIsDeniedEnvVar_Allowed(t *testing.T) {
 	allowed := []string{
 		"MY_CUSTOM_VAR", "GOPATH", "LANG", "TZ",
 		"HOME", "USER", "PATH", "TERM",
-		"SHELL", "HOSTNAME", "TMPDIR",
+		"HOSTNAME", "TMPDIR",
 	}
 
 	for _, key := range allowed {
@@ -218,11 +243,11 @@ func TestBuildEnvironment_MultipleDeniedVarsFiltered(t *testing.T) {
 	executor := &ToolExecutor{
 		req: &protocol.ProxyRequest{
 			Env: map[string]string{
-				"LD_PRELOAD":            "/evil.so",
-				"PYTHONPATH":            "/tmp/backdoor",
-				"NODE_OPTIONS":          "--require /tmp/evil.js",
-				"BASH_FUNC_myfunc%%":    "() { evil; }",
-				"MY_SAFE_VAR":           "safe-value",
+				"LD_PRELOAD":         "/evil.so",
+				"PYTHONPATH":         "/tmp/backdoor",
+				"NODE_OPTIONS":       "--require /tmp/evil.js",
+				"BASH_FUNC_myfunc%%": "() { evil; }",
+				"MY_SAFE_VAR":        "safe-value",
 			},
 		},
 		tool: &config.ToolDef{},

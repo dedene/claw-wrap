@@ -4,6 +4,7 @@ package daemon
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,32 +27,77 @@ import (
 // deniedEnvVars contains environment variable names that must never be
 // injected via request env. These could be used to hijack tool execution.
 var deniedEnvVars = map[string]bool{
-	"LD_PRELOAD":            true,
-	"LD_LIBRARY_PATH":       true,
-	"BASH_ENV":              true,
-	"ENV":                   true,
-	"DYLD_INSERT_LIBRARIES": true,
-	"DYLD_LIBRARY_PATH":     true,
-	"DYLD_FRAMEWORK_PATH":   true,
-	"PYTHONPATH":            true,
-	"PYTHONSTARTUP":         true,
-	"PERL5LIB":              true,
-	"RUBYLIB":               true,
-	"NODE_OPTIONS":          true,
-	"GIT_SSH_COMMAND":       true,
-	"EDITOR":                true,
-	"VISUAL":                true,
-	"PAGER":                 true,
+	// Shell injection vectors
+	"BASH_ENV":       true,
+	"ENV":            true,
+	"CDPATH":         true,
+	"SHELLOPTS":      true,
+	"BASHOPTS":       true,
+	"SHELL":          true,
+	"IFS":            true,
+	"GLOBIGNORE":     true,
+	"PROMPT_COMMAND": true,
+
+	// Language runtime injection
+	"PYTHONPATH":        true,
+	"PYTHONSTARTUP":     true,
+	"PYTHONHOME":        true,
+	"PERL5LIB":          true,
+	"PERL5OPT":          true,
+	"RUBYLIB":           true,
+	"RUBYOPT":           true,
+	"NODE_OPTIONS":      true,
+	"NODE_PATH":         true,
+	"JAVA_TOOL_OPTIONS": true,
+	"_JAVA_OPTIONS":     true,
+	"JAVA_OPTIONS":      true,
+
+	// Execution hijack
+	"GIT_SSH_COMMAND": true,
+	"EDITOR":          true,
+	"VISUAL":          true,
+	"PAGER":           true,
+
+	// Proxy vars (credential exfiltration)
+	"http_proxy":  true,
+	"https_proxy": true,
+	"HTTP_PROXY":  true,
+	"HTTPS_PROXY": true,
+	"ftp_proxy":   true,
+	"FTP_PROXY":   true,
+	"all_proxy":   true,
+	"ALL_PROXY":   true,
+	"no_proxy":    true,
+	"NO_PROXY":    true,
+
+	// Misc dangerous
+	"CURL_CA_BUNDLE":    true,
+	"SSL_CERT_FILE":     true,
+	"SSL_CERT_DIR":      true,
+	"GIT_PROXY_COMMAND": true,
+	"GIT_CONFIG_GLOBAL": true,
+	"GIT_CONFIG_SYSTEM": true,
+	"GIT_EXEC_PATH":     true,
+	"GIT_TEMPLATE_DIR":  true,
+}
+
+// deniedEnvPrefixes contains prefixes that are blocked entirely.
+// Any env var starting with one of these is denied.
+var deniedEnvPrefixes = []string{
+	"LD_",        // Linux dynamic linker (LD_PRELOAD, LD_LIBRARY_PATH, etc.)
+	"DYLD_",      // macOS dynamic linker (DYLD_INSERT_LIBRARIES, etc.)
+	"BASH_FUNC_", // Bash exported functions
 }
 
 // isDeniedEnvVar checks if an environment variable name is in the denylist.
-// Also blocks BASH_FUNC_* prefix (bash function exports).
 func isDeniedEnvVar(key string) bool {
 	if deniedEnvVars[key] {
 		return true
 	}
-	if strings.HasPrefix(key, "BASH_FUNC_") {
-		return true
+	for _, prefix := range deniedEnvPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
 	}
 	return false
 }
@@ -71,7 +117,9 @@ type ToolExecutor struct {
 	cancel    context.CancelFunc
 	timeout   time.Duration
 	threshold int64
+	maxOutSz  int64
 	readMsgTO time.Duration
+	writeTO   time.Duration
 	msgSize   int
 
 	encoder *framing.Encoder
@@ -101,7 +149,9 @@ func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.Too
 		cancel:    cancel,
 		timeout:   timeout,
 		threshold: threshold,
+		maxOutSz:  cfg.GetMaxOutputSize(),
 		readMsgTO: cfg.GetReadMessageTimeout(),
+		writeTO:   cfg.GetWriteTimeout(),
 		msgSize:   cfg.GetMaxStdinMessageSize(),
 		encoder:   framing.NewEncoder(conn),
 	}
@@ -111,28 +161,39 @@ func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.Too
 func (e *ToolExecutor) Run() error {
 	defer e.cleanup()
 
+	// Validate working directory is absolute
+	if !filepath.IsAbs(e.req.Cwd) {
+		log.Printf("[ERROR] working directory is not absolute: %s", e.req.Cwd)
+		e.sendError("invalid working directory")
+		return fmt.Errorf("relative working directory: %s", e.req.Cwd)
+	}
+
 	// Verify working directory exists
 	if _, err := os.Stat(e.req.Cwd); os.IsNotExist(err) {
-		e.sendError(fmt.Sprintf("working directory does not exist: %s", e.req.Cwd))
+		log.Printf("[ERROR] working directory does not exist: %s", e.req.Cwd)
+		e.sendError("invalid working directory")
 		return err
 	}
 
 	// Setup config file if needed
 	if err := e.setupConfigFile(); err != nil {
-		e.sendError(fmt.Sprintf("setup config file: %v", err))
+		log.Printf("[ERROR] setup config file: %v", err)
+		e.sendError("internal error")
 		return err
 	}
 
 	// Build environment
 	env, err := e.buildEnvironment()
 	if err != nil {
-		e.sendError(fmt.Sprintf("build environment: %v", err))
+		log.Printf("[ERROR] build environment: %v", err)
+		e.sendError("internal error")
 		return err
 	}
 
 	// Start the process
 	if err := e.startProcess(env); err != nil {
-		e.sendError(fmt.Sprintf("start process: %v", err))
+		log.Printf("[ERROR] start process: %v", err)
+		e.sendError("failed to start tool")
 		return err
 	}
 
@@ -230,6 +291,10 @@ func (e *ToolExecutor) setupConfigFile() error {
 		return nil
 	}
 
+	// Set restrictive umask for temp file/dir creation, restore after
+	oldUmask := syscall.Umask(0o177)
+	defer syscall.Umask(oldUmask)
+
 	// Create temp directory
 	tempDir, err := os.MkdirTemp("", "claw-wrap-config-*")
 	if err != nil {
@@ -302,8 +367,8 @@ func (e *ToolExecutor) startProcess(env []string) error {
 	e.stdinPipe = stdin
 
 	// Create output buffers
-	e.stdoutBuf = NewOutputBuffer("stdout", e.threshold, e.sendMessage)
-	e.stderrBuf = NewOutputBuffer("stderr", e.threshold, e.sendMessage)
+	e.stdoutBuf = NewOutputBuffer("stdout", e.threshold, e.maxOutSz, e.sendMessage)
+	e.stderrBuf = NewOutputBuffer("stderr", e.threshold, e.maxOutSz, e.sendMessage)
 
 	// Start the process
 	if err := e.cmd.Start(); err != nil {
@@ -340,8 +405,9 @@ func (e *ToolExecutor) runIOLoop() error {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				exitCode = exitErr.ExitCode()
 			} else {
-				// Some other error
-				e.sendError(fmt.Sprintf("process error: %v", err))
+				// Some other error — log details server-side, send generic to client
+				log.Printf("[ERROR] process error: %v", err)
+				e.sendError("process error")
 				return err
 			}
 		}
@@ -386,6 +452,11 @@ func (e *ToolExecutor) stdoutPumper(r io.Reader) {
 		n, err := r.Read(buf)
 		if n > 0 {
 			if writeErr := e.stdoutBuf.Write(buf[:n]); writeErr != nil {
+				if errors.Is(writeErr, ErrOutputLimitExceeded) {
+					log.Printf("[WARN] stdout: %v, killing process", writeErr)
+					e.killProcessGroup(syscall.SIGKILL)
+					return
+				}
 				log.Printf("[WARN] stdout write: %v", writeErr)
 			}
 		}
@@ -407,6 +478,11 @@ func (e *ToolExecutor) stderrPumper(r io.Reader) {
 		n, err := r.Read(buf)
 		if n > 0 {
 			if writeErr := e.stderrBuf.Write(buf[:n]); writeErr != nil {
+				if errors.Is(writeErr, ErrOutputLimitExceeded) {
+					log.Printf("[WARN] stderr: %v, killing process", writeErr)
+					e.killProcessGroup(syscall.SIGKILL)
+					return
+				}
 				log.Printf("[WARN] stderr write: %v", writeErr)
 			}
 		}
@@ -519,6 +595,11 @@ func (e *ToolExecutor) forwardSignal(sig string) error {
 func (e *ToolExecutor) sendMessage(msg interface{}) error {
 	e.sendMu.Lock()
 	defer e.sendMu.Unlock()
+
+	if e.writeTO > 0 {
+		_ = e.conn.SetWriteDeadline(time.Now().Add(e.writeTO))
+		defer func() { _ = e.conn.SetWriteDeadline(time.Time{}) }()
+	}
 
 	return e.encoder.Encode(msg)
 }

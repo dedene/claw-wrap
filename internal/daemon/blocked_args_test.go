@@ -16,10 +16,10 @@ func TestCheckBlockedArgs_Matches(t *testing.T) {
 		wantMsg     string
 	}{
 		{
-			name: "exact match blocks",
+			name: "exact arg match blocks",
 			args: []string{"repo", "delete", "my-repo"},
 			blocked: []config.BlockedArg{
-				{Pattern: `repo\s+delete`, Message: "no repo delete", Compiled: regexp.MustCompile(`repo\s+delete`)},
+				{Pattern: `^delete$`, Message: "no repo delete", Compiled: regexp.MustCompile(`^delete$`)},
 			},
 			wantAllowed: false,
 			wantMsg:     "no repo delete",
@@ -28,7 +28,7 @@ func TestCheckBlockedArgs_Matches(t *testing.T) {
 			name: "no match allows",
 			args: []string{"repo", "list"},
 			blocked: []config.BlockedArg{
-				{Pattern: `repo\s+delete`, Message: "no repo delete", Compiled: regexp.MustCompile(`repo\s+delete`)},
+				{Pattern: `^delete$`, Message: "no repo delete", Compiled: regexp.MustCompile(`^delete$`)},
 			},
 			wantAllowed: true,
 			wantMsg:     "",
@@ -46,7 +46,7 @@ func TestCheckBlockedArgs_Matches(t *testing.T) {
 			name: "default message when empty",
 			args: []string{"repo", "delete"},
 			blocked: []config.BlockedArg{
-				{Pattern: `repo\s+delete`, Message: "", Compiled: regexp.MustCompile(`repo\s+delete`)},
+				{Pattern: `^delete$`, Message: "", Compiled: regexp.MustCompile(`^delete$`)},
 			},
 			wantAllowed: false,
 			wantMsg:     "operation blocked by security policy",
@@ -86,7 +86,7 @@ func TestCheckBlockedArgs_NoPatterns(t *testing.T) {
 
 func TestCheckBlockedArgs_MultiplePatterns(t *testing.T) {
 	blocked := []config.BlockedArg{
-		{Pattern: `repo\s+delete`, Message: "no delete", Compiled: regexp.MustCompile(`repo\s+delete`)},
+		{Pattern: `^delete$`, Message: "no delete", Compiled: regexp.MustCompile(`^delete$`)},
 		{Pattern: `--force`, Message: "no force", Compiled: regexp.MustCompile(`--force`)},
 	}
 
@@ -218,4 +218,44 @@ func TestCheckBlockedArgs_FailClosed_MixedNilCompiled(t *testing.T) {
 	if msg == "" {
 		t.Error("checkBlockedArgs() returned empty message for nil Compiled")
 	}
+}
+
+// TestCheckBlockedArgs_PerArgMatching verifies per-arg matching prevents
+// bypass via embedded spaces (the old join-with-space vulnerability).
+func TestCheckBlockedArgs_PerArgMatching(t *testing.T) {
+	blocked := []config.BlockedArg{
+		{Pattern: `--force`, Message: "no force", Compiled: regexp.MustCompile(`--force`)},
+	}
+
+	t.Run("embedded space bypass attempt", func(t *testing.T) {
+		// Old code: strings.Join(["safe --force"], " ") = "safe --force" → matched
+		// New code: each arg checked individually → "safe --force" still matches (contains --force)
+		allowed, _ := checkBlockedArgs([]string{"safe --force"}, blocked)
+		if allowed {
+			t.Error("per-arg matching should still detect --force within a single arg")
+		}
+	})
+
+	t.Run("cross-boundary pattern no longer falsely matches", func(t *testing.T) {
+		// Pattern matching across arg boundaries should NOT work with per-arg.
+		// e.g., pattern `foo bar` should not match args ["foo", "bar"]
+		crossBoundary := []config.BlockedArg{
+			{Pattern: `foo bar`, Message: "cross", Compiled: regexp.MustCompile(`foo bar`)},
+		}
+		allowed, _ := checkBlockedArgs([]string{"foo", "bar"}, crossBoundary)
+		if !allowed {
+			t.Error("per-arg matching should NOT match pattern across arg boundaries")
+		}
+	})
+
+	t.Run("pattern within single arg still matches", func(t *testing.T) {
+		crossBoundary := []config.BlockedArg{
+			{Pattern: `foo bar`, Message: "cross", Compiled: regexp.MustCompile(`foo bar`)},
+		}
+		// Single arg containing the full pattern should match
+		allowed, _ := checkBlockedArgs([]string{"foo bar"}, crossBoundary)
+		if allowed {
+			t.Error("per-arg matching should match when full pattern is in one arg")
+		}
+	})
 }

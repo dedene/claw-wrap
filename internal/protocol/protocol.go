@@ -2,7 +2,7 @@
 package protocol
 
 // ProtocolVersion is the wire protocol version for wrapper/daemon requests.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 // ProxyRequest is sent by wrapper to request tool execution (NDJSON format)
 type ProxyRequest struct {
@@ -11,6 +11,7 @@ type ProxyRequest struct {
 	Args      []string          `json:"args"`
 	Cwd       string            `json:"cwd"`
 	Timestamp string            `json:"timestamp"`
+	Nonce     string            `json:"nonce"`
 	HMAC      string            `json:"hmac"`
 	Env       map[string]string `json:"env,omitempty"`
 }
@@ -59,6 +60,7 @@ type AdminRequest struct {
 	Version   int    `json:"version,omitempty"`
 	Admin     string `json:"admin"`
 	Timestamp string `json:"timestamp"`
+	Nonce     string `json:"nonce"`
 	HMAC      string `json:"hmac"`
 }
 

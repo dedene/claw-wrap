@@ -1,8 +1,7 @@
-//go:build linux
-
 package daemon
 
 import (
+	"errors"
 	"os"
 	"testing"
 
@@ -20,7 +19,7 @@ func mockSendFn(messages *[]interface{}) func(interface{}) error {
 func TestOutputBuffer_TempFilePermissions(t *testing.T) {
 	// Key security test: temp files must be 0600
 	var msgs []interface{}
-	buf := NewOutputBuffer("stdout", 10, mockSendFn(&msgs))
+	buf := NewOutputBuffer("stdout", 10, 0, mockSendFn(&msgs))
 
 	// Write enough to trigger file mode (> 10 bytes threshold)
 	data := []byte("this exceeds the threshold definitely")
@@ -50,7 +49,7 @@ func TestOutputBuffer_TempFilePermissions(t *testing.T) {
 
 func TestOutputBuffer_InlineMode(t *testing.T) {
 	var msgs []interface{}
-	buf := NewOutputBuffer("stdout", 1024, mockSendFn(&msgs))
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
 
 	// Write small data (stays inline)
 	if err := buf.Write([]byte("hello")); err != nil {
@@ -80,7 +79,7 @@ func TestOutputBuffer_InlineMode(t *testing.T) {
 
 func TestOutputBuffer_SwitchToFileMode(t *testing.T) {
 	var msgs []interface{}
-	buf := NewOutputBuffer("stderr", 10, mockSendFn(&msgs))
+	buf := NewOutputBuffer("stderr", 10, 0, mockSendFn(&msgs))
 
 	// Write data exceeding threshold
 	if err := buf.Write([]byte("exceeds threshold")); err != nil {
@@ -108,7 +107,7 @@ func TestOutputBuffer_SwitchToFileMode(t *testing.T) {
 
 func TestOutputBuffer_Cleanup(t *testing.T) {
 	var msgs []interface{}
-	buf := NewOutputBuffer("stdout", 10, mockSendFn(&msgs))
+	buf := NewOutputBuffer("stdout", 10, 0, mockSendFn(&msgs))
 
 	buf.Write([]byte("exceeds threshold"))
 	path, _ := buf.Finalize()
@@ -130,7 +129,7 @@ func TestOutputBuffer_Cleanup(t *testing.T) {
 
 func TestOutputBuffer_EmptyWrite(t *testing.T) {
 	var msgs []interface{}
-	buf := NewOutputBuffer("stdout", 1024, mockSendFn(&msgs))
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
 
 	// Empty write should be a no-op
 	if err := buf.Write([]byte{}); err != nil {
@@ -143,4 +142,71 @@ func TestOutputBuffer_EmptyWrite(t *testing.T) {
 	if len(msgs) != 0 {
 		t.Errorf("expected no messages for empty writes, got %d", len(msgs))
 	}
+}
+
+func TestOutputBuffer_MaxOutputSize_Exceeded(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 1024, 50, mockSendFn(&msgs))
+
+	// First write under limit
+	if err := buf.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	// Second write exceeds 50-byte limit
+	err := buf.Write(make([]byte, 50))
+	if err == nil {
+		t.Fatal("Write() should return error when limit exceeded")
+	}
+	if !errors.Is(err, ErrOutputLimitExceeded) {
+		t.Errorf("Write() error = %v, want ErrOutputLimitExceeded", err)
+	}
+}
+
+func TestOutputBuffer_MaxOutputSize_ExactLimit(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 1024, 10, mockSendFn(&msgs))
+
+	// Write exactly at limit — should succeed
+	if err := buf.Write([]byte("0123456789")); err != nil {
+		t.Fatalf("Write() error = %v (should succeed at exact limit)", err)
+	}
+
+	// One more byte should fail
+	err := buf.Write([]byte("x"))
+	if !errors.Is(err, ErrOutputLimitExceeded) {
+		t.Errorf("Write() error = %v, want ErrOutputLimitExceeded", err)
+	}
+}
+
+func TestOutputBuffer_MaxOutputSize_Zero_Unlimited(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
+
+	// With maxOutputSize=0, no limit — large writes should succeed
+	if err := buf.Write(make([]byte, 500)); err != nil {
+		t.Fatalf("Write() error = %v, want nil (unlimited)", err)
+	}
+	if err := buf.Write(make([]byte, 500)); err != nil {
+		t.Fatalf("Write() error = %v, want nil (unlimited)", err)
+	}
+}
+
+func TestOutputBuffer_MaxOutputSize_FileMode(t *testing.T) {
+	var msgs []interface{}
+	// threshold=10, maxOutputSize=30 → first write triggers file mode, second exceeds limit
+	buf := NewOutputBuffer("stdout", 10, 30, mockSendFn(&msgs))
+
+	// First write exceeds inline threshold (10) but under output limit (30)
+	if err := buf.Write([]byte("twenty chars here!!!")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	// Second write pushes past 30-byte output limit
+	err := buf.Write([]byte("more data here"))
+	if !errors.Is(err, ErrOutputLimitExceeded) {
+		t.Errorf("Write() error = %v, want ErrOutputLimitExceeded", err)
+	}
+
+	buf.Cleanup()
 }

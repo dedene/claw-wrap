@@ -66,9 +66,6 @@ proxy:
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
 
-security:
-  allow_unverified_caller_exe: false
-
 credentials:
   github-token:
     source: pass:cli/github/token

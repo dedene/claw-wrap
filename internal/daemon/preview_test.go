@@ -9,27 +9,42 @@ func TestCredentialPreview(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "long secret",
+			name:  "long secret (12 chars)",
 			value: "582a123459e9",
 			want:  "58.....e9",
 		},
 		{
-			name:  "four chars",
+			name:  "exactly 8 chars",
+			value: "abcdefgh",
+			want:  "ab.....gh",
+		},
+		{
+			name:  "seven chars - partial mask",
+			value: "abcdefg",
+			want:  "a.....g",
+		},
+		{
+			name:  "five chars - partial mask",
+			value: "abcde",
+			want:  "a.....e",
+		},
+		{
+			name:  "four chars - fully masked",
 			value: "abcd",
-			want:  "a.....d",
+			want:  "****...****",
 		},
 		{
-			name:  "three chars",
+			name:  "three chars - fully masked",
 			value: "abc",
-			want:  "a.....c",
+			want:  "****...****",
 		},
 		{
-			name:  "two chars",
+			name:  "two chars - fully masked",
 			value: "ab",
 			want:  "****...****",
 		},
 		{
-			name:  "one char",
+			name:  "one char - fully masked",
 			value: "a",
 			want:  "****...****",
 		},

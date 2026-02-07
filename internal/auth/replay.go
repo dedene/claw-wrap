@@ -48,6 +48,28 @@ func (c *ReplayCache) SeenOrStore(key string, now time.Time) bool {
 	return false
 }
 
+// UpdateSettings updates TTL and maxEntries without clearing existing entries.
+// This allows preserving the replay cache across config reloads (SIGHUP).
+func (c *ReplayCache) UpdateSettings(ttl time.Duration, maxEntries int) {
+	if ttl <= 0 {
+		ttl = 2 * time.Minute
+	}
+	if maxEntries <= 0 {
+		maxEntries = 10000
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.ttl = ttl
+	c.maxEntries = maxEntries
+
+	// Trim excess entries if new max is smaller.
+	for len(c.entries) > c.maxEntries {
+		c.evictOneLocked()
+	}
+}
+
 func (c *ReplayCache) evictExpiredLocked(now time.Time) {
 	for k, exp := range c.entries {
 		if now.After(exp) {

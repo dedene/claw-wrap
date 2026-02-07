@@ -148,6 +148,9 @@ func (d *Daemon) Run() error {
 	d.cfg = cfg
 	d.cfgMu.Unlock()
 
+	// Sweep stale temp directories from crashed daemon processes
+	sweepStaleTempDirs()
+
 	d.connSem = make(chan struct{}, cfg.GetMaxConnections())
 	d.replayCache = auth.NewReplayCache(cfg.GetReplayCacheTTL(), cfg.GetReplayCacheMaxEntries())
 
@@ -221,7 +224,7 @@ func (d *Daemon) reloadConfig() error {
 
 	d.cfgMu.Lock()
 	d.cfg = newCfg
-	d.replayCache = auth.NewReplayCache(newCfg.GetReplayCacheTTL(), newCfg.GetReplayCacheMaxEntries())
+	d.replayCache.UpdateSettings(newCfg.GetReplayCacheTTL(), newCfg.GetReplayCacheMaxEntries())
 	d.cfgMu.Unlock()
 	return nil
 }
@@ -234,6 +237,13 @@ func (d *Daemon) getConfig() *config.Config {
 
 func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 	defer conn.Close()
+
+	// Enforce overall connection lifetime if configured.
+	if maxLife := cfg.GetMaxConnectionLifetime(); maxLife > 0 {
+		_ = conn.SetDeadline(time.Now().Add(maxLife))
+		// Individual read/write deadlines below may shorten this further
+		// but can never extend past the overall deadline.
+	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(cfg.GetReadHeaderTimeout())); err != nil {
 		log.Printf("[WARN] set header deadline: %v", err)
@@ -267,10 +277,23 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		return
 	}
 
+	// Parse JSON early to determine request type so we can use the
+	// correct error framing (raw JSON for admin, length-prefixed for proxy).
+	var rawRequest map[string]interface{}
+	if err := json.Unmarshal(payload, &rawRequest); err != nil {
+		d.sendError(conn, "invalid json")
+		return
+	}
+	isProxy := rawRequest["hmac"] != nil
+	errSend := d.sendError
+	if isProxy {
+		errSend = d.sendProxyError
+	}
+
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		d.metrics.Inc("caller_verify_fail")
-		d.sendError(conn, "internal error: not a unix connection")
+		errSend(conn, "internal error: not a unix connection")
 		return
 	}
 
@@ -278,24 +301,24 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 	if err != nil {
 		d.metrics.Inc("caller_verify_fail")
 		log.Printf("[WARN] deny reason=peer_cred_error err=%v", err)
-		d.sendError(conn, "failed to verify caller")
+		errSend(conn, "failed to verify caller")
 		return
 	}
 
 	if ucred.UID != d.allowedUID {
 		d.metrics.Inc("caller_verify_fail")
 		log.Printf("[WARN] deny reason=uid_mismatch uid=%d expected=%d", ucred.UID, d.allowedUID)
-		d.sendError(conn, "unauthorized caller")
+		errSend(conn, "unauthorized caller")
 		return
 	}
 
 	callerInfo := fmt.Sprintf("pid:%d", ucred.PID)
 	exe, err := resolvePeerExecutable(ucred.PID)
 	if err != nil {
-		if !cfg.AllowUnverifiedCallerExe() {
+		if cfg.DenyUnverifiedCallerExe() {
 			d.metrics.Inc("caller_verify_fail")
 			log.Printf("[WARN] deny reason=exe_unreadable pid=%d err=%v", ucred.PID, err)
-			d.sendError(conn, "unauthorized caller")
+			errSend(conn, "unauthorized caller")
 			return
 		}
 		callerInfo = fmt.Sprintf("pid:%d exe:unverified", ucred.PID)
@@ -304,23 +327,17 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		if !d.isAllowedBinary(exe) {
 			d.metrics.Inc("caller_verify_fail")
 			log.Printf("[WARN] deny reason=exe_not_allowed exe=%q", exe)
-			d.sendError(conn, "unauthorized caller")
+			errSend(conn, "unauthorized caller")
 			return
 		}
 	}
 
 	log.Printf("[DEBUG] peer pid=%d uid=%d exe=%s", ucred.PID, ucred.UID, callerInfo)
 
-	var rawRequest map[string]interface{}
-	if err := json.Unmarshal(payload, &rawRequest); err != nil {
-		d.sendError(conn, "invalid json")
-		return
-	}
-
 	switch {
 	case rawRequest["admin"] != nil:
 		d.handleAdminRequest(conn, payload, cfg, ucred.UID)
-	case rawRequest["hmac"] != nil:
+	case isProxy:
 		d.handleProxyRequest(conn, payload, cfg, callerInfo, ucred.UID)
 	default:
 		d.sendError(conn, "invalid request: use proxy protocol")
@@ -335,11 +352,12 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	}
 
 	if req.Version != protocol.ProtocolVersion {
-		d.sendError(conn, fmt.Sprintf("protocol version mismatch: got %d want %d", req.Version, protocol.ProtocolVersion))
+		log.Printf("[WARN] admin protocol version mismatch: got %d want %d", req.Version, protocol.ProtocolVersion)
+		d.sendError(conn, "protocol version mismatch")
 		return
 	}
 
-	if err := auth.VerifyHMAC(d.secret, req.Timestamp, "admin:"+req.Admin, "", nil, req.HMAC); err != nil {
+	if err := auth.VerifyHMAC(d.secret, req.Timestamp, "admin:"+req.Admin, "", nil, req.Nonce, req.HMAC); err != nil {
 		d.metrics.Inc("auth_fail")
 		log.Printf("[WARN] deny reason=auth_failed admin=%s err=%v", req.Admin, err)
 		d.sendError(conn, "authentication failed")
@@ -379,7 +397,8 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 		d.sendJSON(conn, resp)
 
 	default:
-		d.sendError(conn, fmt.Sprintf("unknown admin command: %s", req.Admin))
+		log.Printf("[WARN] unknown admin command: %s", req.Admin)
+		d.sendError(conn, "unknown admin command")
 	}
 }
 
@@ -391,11 +410,12 @@ func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Conf
 	}
 
 	if req.Version != protocol.ProtocolVersion {
-		d.sendProxyError(conn, fmt.Sprintf("protocol version mismatch: got %d want %d", req.Version, protocol.ProtocolVersion))
+		log.Printf("[WARN] proxy protocol version mismatch: got %d want %d", req.Version, protocol.ProtocolVersion)
+		d.sendProxyError(conn, "protocol version mismatch")
 		return
 	}
 
-	if err := auth.VerifyHMACWithEnv(d.secret, req.Timestamp, req.Tool, req.Cwd, req.Args, req.Env, req.HMAC); err != nil {
+	if err := auth.VerifyHMACWithEnv(d.secret, req.Timestamp, req.Tool, req.Cwd, req.Args, req.Env, req.Nonce, req.HMAC); err != nil {
 		d.metrics.Inc("auth_fail")
 		log.Printf("[WARN] deny reason=auth_failed tool=%s err=%v", req.Tool, err)
 		d.sendProxyError(conn, "authentication failed")
@@ -412,7 +432,8 @@ func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Conf
 
 	tool, ok := cfg.Tools[req.Tool]
 	if !ok {
-		d.sendProxyError(conn, fmt.Sprintf("unknown tool: %s", req.Tool))
+		log.Printf("[WARN] unknown tool requested: %s", req.Tool)
+		d.sendProxyError(conn, "unknown tool")
 		return
 	}
 
@@ -432,6 +453,12 @@ func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Conf
 }
 
 func (d *Daemon) sendProxyError(conn net.Conn, message string) {
+	writeTO := d.getConfig().GetWriteTimeout()
+	if writeTO > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTO))
+		defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+	}
+
 	encoder := framing.NewEncoder(conn)
 	_ = encoder.Encode(&protocol.ResponseMessage{
 		Type:    protocol.MsgTypeError,
@@ -444,34 +471,50 @@ func checkBlockedArgs(args []string, blocked []config.BlockedArg) (bool, string)
 		return true, ""
 	}
 
-	cmdLine := strings.Join(args, " ")
 	for _, b := range blocked {
 		if b.Compiled == nil {
 			log.Printf("[ERROR] nil compiled pattern for %q - fail-closed", b.Pattern)
 			return false, "internal error: invalid security pattern"
 		}
-		if b.Compiled.MatchString(cmdLine) {
-			msg := b.Message
-			if msg == "" {
-				msg = "operation blocked by security policy"
+		// Match each arg individually to prevent bypass via embedded spaces.
+		// Previously used strings.Join(args, " ") which allowed an attacker
+		// to smuggle patterns across arg boundaries.
+		for _, arg := range args {
+			if b.Compiled.MatchString(arg) {
+				msg := b.Message
+				if msg == "" {
+					msg = "operation blocked by security policy"
+				}
+				return false, msg
 			}
-			return false, msg
 		}
 	}
 
 	return true, ""
 }
 
+// yamlEscapeValue wraps a credential value in single quotes for safe YAML
+// interpolation. Embedded single quotes are escaped per the YAML spec by
+// doubling them (” inside a single-quoted scalar).
+func yamlEscapeValue(v string) string {
+	escaped := strings.ReplaceAll(v, "'", "''")
+	return "'" + escaped + "'"
+}
+
 // renderTemplate substitutes credential values into a template.
+// Values are YAML-escaped (single-quoted) to prevent credential contents
+// from breaking the template structure via special YAML characters.
 func renderTemplate(template string, values map[string]string) string {
 	content := template
 	for name, value := range values {
+		escaped := yamlEscapeValue(value)
+
 		placeholder := "{{ ." + name + " }}"
-		content = strings.ReplaceAll(content, placeholder, value)
+		content = strings.ReplaceAll(content, placeholder, escaped)
 
 		underscoreName := strings.ReplaceAll(name, "-", "_")
 		placeholder = "{{ ." + underscoreName + " }}"
-		content = strings.ReplaceAll(content, placeholder, value)
+		content = strings.ReplaceAll(content, placeholder, escaped)
 	}
 	return content
 }
@@ -501,6 +544,12 @@ func (d *Daemon) sendError(conn net.Conn, msg string) {
 }
 
 func (d *Daemon) sendJSON(conn net.Conn, v interface{}) {
+	writeTO := d.getConfig().GetWriteTimeout()
+	if writeTO > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTO))
+		defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+	}
+
 	data, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("[ERROR] marshal response: %v", err)
@@ -546,5 +595,23 @@ func (d *Daemon) logMetricsLoop() {
 		}
 		payload, _ := json.Marshal(s)
 		log.Printf("[INFO] security_metrics %s", payload)
+	}
+}
+
+// sweepStaleTempDirs removes leftover claw-wrap-config-* directories
+// from os.TempDir(). These are leftovers from crashed daemon processes.
+func sweepStaleTempDirs() {
+	pattern := filepath.Join(os.TempDir(), "claw-wrap-config-*")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		log.Printf("[WARN] sweep stale temp dirs: glob error: %v", err)
+		return
+	}
+	for _, m := range matches {
+		if err := os.RemoveAll(m); err != nil {
+			log.Printf("[WARN] sweep stale temp dir %s: %v", m, err)
+		} else {
+			log.Printf("[INFO] swept stale temp dir: %s", m)
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidate_ValidBlockedArgs(t *testing.T) {
@@ -476,5 +477,120 @@ func TestGetProxySecurityDefaults(t *testing.T) {
 	}
 	if got := cfg.GetReplayCacheMaxEntries(); got != DefaultReplayCacheMaxEntries {
 		t.Errorf("GetReplayCacheMaxEntries() = %d, want %d", got, DefaultReplayCacheMaxEntries)
+	}
+}
+
+func TestGetReplayCacheTTL_Floor(t *testing.T) {
+	tests := []struct {
+		name string
+		ttl  string
+		want time.Duration
+	}{
+		{"below floor", "5s", 10 * time.Second},
+		{"at floor", "10s", 10 * time.Second},
+		{"above floor", "30s", 30 * time.Second},
+		{"well above", "2m", 2 * time.Minute},
+		{"1s should clamp", "1s", 10 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Proxy: &ProxyConfig{
+					ReplayCacheTTL: tt.ttl,
+				},
+			}
+			if got := cfg.GetReplayCacheTTL(); got != tt.want {
+				t.Errorf("GetReplayCacheTTL(%q) = %v, want %v", tt.ttl, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetMaxOutputSize(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want int64
+	}{
+		{"nil proxy", &Config{}, 0},
+		{"empty value", &Config{Proxy: &ProxyConfig{}}, 0},
+		{"100MB", &Config{Proxy: &ProxyConfig{MaxOutputSize: "100MB"}}, 100 * 1024 * 1024},
+		{"1G", &Config{Proxy: &ProxyConfig{MaxOutputSize: "1G"}}, 1024 * 1024 * 1024},
+		{"plain bytes", &Config{Proxy: &ProxyConfig{MaxOutputSize: "1048576"}}, 1048576},
+		{"invalid", &Config{Proxy: &ProxyConfig{MaxOutputSize: "not-a-size"}}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetMaxOutputSize(); got != tt.want {
+				t.Errorf("GetMaxOutputSize() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetWriteTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want time.Duration
+	}{
+		{"nil proxy", &Config{}, DefaultWriteTimeout},
+		{"empty value", &Config{Proxy: &ProxyConfig{}}, DefaultWriteTimeout},
+		{"30s", &Config{Proxy: &ProxyConfig{WriteTimeout: "30s"}}, 30 * time.Second},
+		{"1m", &Config{Proxy: &ProxyConfig{WriteTimeout: "1m"}}, time.Minute},
+		{"invalid", &Config{Proxy: &ProxyConfig{WriteTimeout: "not-a-duration"}}, DefaultWriteTimeout},
+		{"zero", &Config{Proxy: &ProxyConfig{WriteTimeout: "0s"}}, DefaultWriteTimeout},
+		{"negative", &Config{Proxy: &ProxyConfig{WriteTimeout: "-5s"}}, DefaultWriteTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetWriteTimeout(); got != tt.want {
+				t.Errorf("GetWriteTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetPassBinary_AbsolutePathValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{"nil proxy", &Config{}, "/usr/bin/pass"},
+		{"empty", &Config{Proxy: &ProxyConfig{}}, "/usr/bin/pass"},
+		{"absolute path", &Config{Proxy: &ProxyConfig{PassBinary: "/usr/local/bin/pass"}}, "/usr/local/bin/pass"},
+		{"relative path rejected", &Config{Proxy: &ProxyConfig{PassBinary: "pass"}}, "/usr/bin/pass"},
+		{"relative with dir rejected", &Config{Proxy: &ProxyConfig{PassBinary: "./bin/pass"}}, "/usr/bin/pass"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetPassBinary(); got != tt.want {
+				t.Errorf("GetPassBinary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetMaxConnectionLifetime(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want time.Duration
+	}{
+		{"nil proxy", &Config{}, 0},
+		{"empty value", &Config{Proxy: &ProxyConfig{}}, 0},
+		{"10m", &Config{Proxy: &ProxyConfig{MaxConnectionLifetime: "10m"}}, 10 * time.Minute},
+		{"1h", &Config{Proxy: &ProxyConfig{MaxConnectionLifetime: "1h"}}, time.Hour},
+		{"invalid", &Config{Proxy: &ProxyConfig{MaxConnectionLifetime: "bad"}}, 0},
+		{"zero", &Config{Proxy: &ProxyConfig{MaxConnectionLifetime: "0s"}}, 0},
+		{"negative", &Config{Proxy: &ProxyConfig{MaxConnectionLifetime: "-5s"}}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetMaxConnectionLifetime(); got != tt.want {
+				t.Errorf("GetMaxConnectionLifetime() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

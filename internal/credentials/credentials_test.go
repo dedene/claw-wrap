@@ -10,8 +10,10 @@ import (
 func writeMockPassScript(t *testing.T, dir, markerFile string) string {
 	t.Helper()
 	scriptPath := filepath.Join(dir, "mock-pass")
+	// Skip the '--' separator arg, use the last positional arg as the path
 	script := `#!/bin/sh
 echo "$0" > "` + markerFile + `"
+shift  # skip '--'
 echo "secret-for-$1"
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {

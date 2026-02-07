@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -9,30 +10,37 @@ import (
 	"claw-wrap/internal/protocol"
 )
 
+// ErrOutputLimitExceeded is returned when output exceeds the configured max size.
+var ErrOutputLimitExceeded = errors.New("output size limit exceeded")
+
 // OutputBuffer handles streaming output with threshold-based file fallback.
 // When output is below the threshold, data is streamed as base64-encoded chunks.
 // When output exceeds the threshold, data is written to a temp file instead.
+// If maxOutputSize > 0, total output is capped and ErrOutputLimitExceeded returned.
 type OutputBuffer struct {
-	stream      string                  // "stdout" or "stderr"
-	threshold   int64                   // switch to file above this
-	accumulated int64                   // bytes seen so far
-	inlineMode  bool                    // true if still streaming inline
-	tempFile    *os.File                // nil until threshold exceeded
-	tempPath    string                  // path for cleanup/response
-	sendFn      func(interface{}) error // sends length-prefixed message
-	mu          sync.Mutex
+	stream        string                  // "stdout" or "stderr"
+	threshold     int64                   // switch to file above this
+	maxOutputSize int64                   // 0 = unlimited
+	accumulated   int64                   // bytes seen so far
+	inlineMode    bool                    // true if still streaming inline
+	tempFile      *os.File                // nil until threshold exceeded
+	tempPath      string                  // path for cleanup/response
+	sendFn        func(interface{}) error // sends length-prefixed message
+	mu            sync.Mutex
 }
 
 // NewOutputBuffer creates a new OutputBuffer for the given stream.
 // The stream parameter should be "stdout" or "stderr".
 // The threshold specifies the byte limit before switching to file mode.
+// The maxOutputSize caps total output (0 = unlimited).
 // The sendFn is called to send ResponseMessage chunks for inline data.
-func NewOutputBuffer(stream string, threshold int64, sendFn func(interface{}) error) *OutputBuffer {
+func NewOutputBuffer(stream string, threshold int64, maxOutputSize int64, sendFn func(interface{}) error) *OutputBuffer {
 	return &OutputBuffer{
-		stream:     stream,
-		threshold:  threshold,
-		inlineMode: true,
-		sendFn:     sendFn,
+		stream:        stream,
+		threshold:     threshold,
+		maxOutputSize: maxOutputSize,
+		inlineMode:    true,
+		sendFn:        sendFn,
 	}
 }
 
@@ -45,6 +53,11 @@ func (b *OutputBuffer) Write(data []byte) error {
 
 	if len(data) == 0 {
 		return nil
+	}
+
+	// Check output size limit
+	if b.maxOutputSize > 0 && b.accumulated+int64(len(data)) > b.maxOutputSize {
+		return ErrOutputLimitExceeded
 	}
 
 	// Check if this write would exceed the threshold

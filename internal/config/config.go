@@ -33,6 +33,8 @@ const (
 	DefaultReplayCacheTTL = 2 * time.Minute
 	// DefaultReplayCacheMaxEntries is the default replay cache size cap.
 	DefaultReplayCacheMaxEntries = 10000
+	// DefaultWriteTimeout is the default write deadline for daemon→client writes.
+	DefaultWriteTimeout = 30 * time.Second
 )
 
 // DefaultConfigPath is the default location for wrappers.yaml.
@@ -40,21 +42,26 @@ const DefaultConfigPath = "/etc/openclaw/wrappers.yaml"
 
 // ProxyConfig holds proxy-related configuration.
 type ProxyConfig struct {
-	Timeout             string `yaml:"timeout"`                // e.g., "300s"
-	InlineThreshold     string `yaml:"inline_threshold"`       // e.g., "1MB"
-	HMACSecretFile      string `yaml:"hmac_secret_file"`       // e.g., "/run/openclaw/auth"
-	PassBinary          string `yaml:"pass_binary"`            // e.g., "/usr/bin/pass"
-	MaxConnections      int    `yaml:"max_connections"`        // e.g., 64
-	ReadHeaderTimeout   string `yaml:"read_header_timeout"`    // e.g., "3s"
-	ReadMessageTimeout  string `yaml:"read_message_timeout"`   // e.g., "15s"
-	MaxStdinMessageSize string `yaml:"max_stdin_message_size"` // e.g., "1MB"
-	ReplayCacheTTL      string `yaml:"replay_cache_ttl"`       // e.g., "2m"
-	ReplayCacheMax      int    `yaml:"replay_cache_max_entries"`
+	Timeout               string `yaml:"timeout"`                 // e.g., "300s"
+	InlineThreshold       string `yaml:"inline_threshold"`        // e.g., "1MB"
+	HMACSecretFile        string `yaml:"hmac_secret_file"`        // e.g., "/run/openclaw/auth"
+	PassBinary            string `yaml:"pass_binary"`             // e.g., "/usr/bin/pass"
+	MaxConnections        int    `yaml:"max_connections"`         // e.g., 64
+	ReadHeaderTimeout     string `yaml:"read_header_timeout"`     // e.g., "3s"
+	ReadMessageTimeout    string `yaml:"read_message_timeout"`    // e.g., "15s"
+	MaxStdinMessageSize   string `yaml:"max_stdin_message_size"`  // e.g., "1MB"
+	MaxOutputSize         string `yaml:"max_output_size"`         // e.g., "100MB" (0 = unlimited)
+	WriteTimeout          string `yaml:"write_timeout"`           // e.g., "30s"
+	MaxConnectionLifetime string `yaml:"max_connection_lifetime"` // e.g., "10m" (0 = unlimited)
+	ReplayCacheTTL        string `yaml:"replay_cache_ttl"`        // e.g., "2m"
+	ReplayCacheMax        int    `yaml:"replay_cache_max_entries"`
 }
 
 // SecurityConfig holds security policy flags.
 type SecurityConfig struct {
-	AllowUnverifiedCallerExe bool `yaml:"allow_unverified_caller_exe"`
+	// DenyUnverifiedCallerExe rejects connections when /proc/<pid>/exe
+	// cannot be read (e.g. inside firejail). Default: false (allow).
+	DenyUnverifiedCallerExe bool `yaml:"deny_unverified_caller_exe"`
 }
 
 // Config is the root configuration structure.
@@ -321,16 +328,22 @@ func (c *Config) GetHMACSecretFile() string {
 }
 
 // GetPassBinary returns the configured pass binary path or the default.
+// The returned path is always absolute.
 func (c *Config) GetPassBinary() string {
 	if c.Proxy != nil && c.Proxy.PassBinary != "" {
+		if !filepath.IsAbs(c.Proxy.PassBinary) {
+			log.Printf("[WARN] pass_binary %q is not absolute, using default", c.Proxy.PassBinary)
+			return "/usr/bin/pass"
+		}
 		return c.Proxy.PassBinary
 	}
 	return "/usr/bin/pass"
 }
 
-// AllowUnverifiedCallerExe returns whether executable verification can fail open.
-func (c *Config) AllowUnverifiedCallerExe() bool {
-	return c.Security != nil && c.Security.AllowUnverifiedCallerExe
+// DenyUnverifiedCallerExe returns whether to reject connections when
+// /proc/<pid>/exe is unreadable. Default: false (allow).
+func (c *Config) DenyUnverifiedCallerExe() bool {
+	return c.Security != nil && c.Security.DenyUnverifiedCallerExe
 }
 
 // GetMaxConnections returns the max concurrent daemon connections.
@@ -380,7 +393,21 @@ func (c *Config) GetMaxStdinMessageSize() int {
 	return int(size)
 }
 
+// GetMaxOutputSize returns the max output size limit in bytes.
+// Returns 0 (unlimited) by default — this is opt-in only.
+func (c *Config) GetMaxOutputSize() int64 {
+	if c.Proxy == nil || c.Proxy.MaxOutputSize == "" {
+		return 0
+	}
+	size, err := ParseByteSize(c.Proxy.MaxOutputSize)
+	if err != nil || size <= 0 {
+		return 0
+	}
+	return size
+}
+
 // GetReplayCacheTTL returns replay cache TTL.
+// Enforces a minimum of 10 seconds to prevent trivially short replay windows.
 func (c *Config) GetReplayCacheTTL() time.Duration {
 	if c.Proxy == nil || c.Proxy.ReplayCacheTTL == "" {
 		return DefaultReplayCacheTTL
@@ -388,6 +415,10 @@ func (c *Config) GetReplayCacheTTL() time.Duration {
 	d, err := ParseDuration(c.Proxy.ReplayCacheTTL)
 	if err != nil || d <= 0 {
 		return DefaultReplayCacheTTL
+	}
+	const minTTL = 10 * time.Second
+	if d < minTTL {
+		return minTTL
 	}
 	return d
 }
@@ -398,6 +429,31 @@ func (c *Config) GetReplayCacheMaxEntries() int {
 		return DefaultReplayCacheMaxEntries
 	}
 	return c.Proxy.ReplayCacheMax
+}
+
+// GetWriteTimeout returns the write deadline for daemon→client responses.
+func (c *Config) GetWriteTimeout() time.Duration {
+	if c.Proxy == nil || c.Proxy.WriteTimeout == "" {
+		return DefaultWriteTimeout
+	}
+	d, err := ParseDuration(c.Proxy.WriteTimeout)
+	if err != nil || d <= 0 {
+		return DefaultWriteTimeout
+	}
+	return d
+}
+
+// GetMaxConnectionLifetime returns the maximum lifetime for a single connection.
+// Returns 0 (unlimited) by default — this is opt-in only.
+func (c *Config) GetMaxConnectionLifetime() time.Duration {
+	if c.Proxy == nil || c.Proxy.MaxConnectionLifetime == "" {
+		return 0
+	}
+	d, err := ParseDuration(c.Proxy.MaxConnectionLifetime)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // GetTimeout returns the tool-specific timeout or falls back to the global default.

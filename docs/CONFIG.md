@@ -17,9 +17,9 @@ proxy:
   max_stdin_message_size: 1MB
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
-
-security:
-  allow_unverified_caller_exe: false
+  write_timeout: 30s
+  max_output_size: 100MB
+  max_connection_lifetime: 30m
 
 credentials:
   github-token:
@@ -49,9 +49,13 @@ proxy:
   max_stdin_message_size: 1MB              # Max wrapper->daemon NDJSON message
   replay_cache_ttl: 2m                     # Replay protection cache TTL
   replay_cache_max_entries: 10000          # Replay cache size bound
+  write_timeout: 30s                       # Write deadline per response message
+  max_output_size: 100MB                   # Kill tool if output exceeds this
+  max_connection_lifetime: 30m             # Hard cap on connection duration
+  pass_binary: /usr/bin/pass               # Absolute path to pass binary
 
 security:
-  allow_unverified_caller_exe: false       # Fail closed if caller executable cannot be resolved
+  # deny_unverified_caller_exe: true       # Opt-in: reject when /proc/<pid>/exe is unreadable
 
 # Credential definitions
 credentials:
@@ -120,6 +124,10 @@ proxy:
   max_stdin_message_size: 1MB               # Max stdin/control message size
   replay_cache_ttl: 2m                      # Replay detection TTL
   replay_cache_max_entries: 10000           # Replay cache size cap
+  write_timeout: 30s                        # Write deadline per response message
+  max_output_size: 100MB                    # Kill tool if output exceeds this
+  max_connection_lifetime: 30m              # Hard cap on connection duration
+  pass_binary: /usr/bin/pass                # Absolute path to pass binary
 ```
 
 ### `timeout`
@@ -156,17 +164,42 @@ Maximum size of wrapper-to-daemon NDJSON messages (`stdin`, `signal`, `cleanup`)
 
 Controls replay protection for authenticated requests. Reuse of the same signed request within TTL is rejected.
 
+Note: the TTL has a floor of 10 seconds — values below 10s are clamped.
+
+### `write_timeout`
+
+Deadline for each response message written back to the wrapper. Default: `30s`. Prevents slow/stalled clients from holding connections open indefinitely.
+
+### `max_output_size`
+
+Maximum combined stdout + stderr output before the tool process is killed. Use size notation: `100MB`, `1GB`. Default: `0` (unlimited — opt-in only).
+
+When the limit is reached, the process is killed with `SIGKILL` and the connection is closed.
+
+### `max_connection_lifetime`
+
+Hard upper bound on how long a single connection can remain open. Use Go duration format: `30m`, `1h`. Default: `0` (unlimited — opt-in only).
+
+Individual read/write deadlines may shorten the effective timeout but never extend past this limit.
+
+### `pass_binary`
+
+Absolute path to the `pass` binary used for fetching credentials. Default: `/usr/bin/pass`.
+
+Must be an absolute path — relative paths are rejected with a warning and the default is used instead.
+
 ## Security Settings
 
 ```yaml
 security:
-  allow_unverified_caller_exe: false
+  deny_unverified_caller_exe: false
 ```
 
-### `allow_unverified_caller_exe`
+### `deny_unverified_caller_exe`
 
-Default is `false` (recommended): if caller executable resolution fails, request is denied (fail closed).  
-Set to `true` only for exceptional environments where executable lookup is unavailable.
+Default is `false`: if caller executable resolution fails (e.g. inside firejail),
+the request is still allowed — HMAC auth + UID check provide sufficient security.
+Set to `true` to reject connections when `/proc/<pid>/exe` is unreadable (opt-in hardening).
 
 ## Credential Sources
 
@@ -241,17 +274,17 @@ tools:
 
 ### `blocked_args` (optional)
 
-List of regex patterns that block certain arguments.
+List of regex patterns that block certain arguments. Each pattern is matched against each individual argument — patterns cannot match across argument boundaries.
 
 ```yaml
 tools:
   mytool:
     binary: /usr/local/bin/mytool
     blocked_args:
-      - pattern: "delete\\s+--force"
-        message: "Force delete is not allowed"
-      - pattern: "(rm|remove)\\s+-rf"
-        message: "Recursive delete blocked"
+      - pattern: "delete"
+        message: "Delete is not allowed"
+      - pattern: "--force"
+        message: "Force flag blocked"
 ```
 
 ### `config_file` (optional)
@@ -293,12 +326,20 @@ template: |
 Credential names with dashes can also use underscores:
 - `{{ .my-api-key }}` and `{{ .my_api_key }}` both work
 
+Credential values are automatically YAML-escaped using single-quote wrapping before substitution. This prevents injection attacks where a credential value contains YAML metacharacters (colons, hashes, braces) or embedded newlines.
+
 ## Security Notes
 
-1. **Blocked args are enforced server-side** - the agent cannot bypass them
-2. **Forced env vars cannot be overridden** - stripped from inherited environment
-3. **Config file paths are validated** - absolute/traversal paths are rejected
-4. **Config file is in a temp directory** - cleaned up after tool exits
-5. **Socket requires UID match** - only the configured user can connect
-6. **Binary path is verified** - by default executable resolution is fail-closed
-7. **Requests are replay-protected** - duplicate HMACs within TTL are rejected
+1. **Blocked args are enforced server-side** — the agent cannot bypass them; patterns match per-argument
+2. **Forced env vars cannot be overridden** — stripped from inherited environment
+3. **Config file paths are validated** — absolute/traversal paths are rejected
+4. **Config file is in a temp directory** — created with restrictive umask (0600), cleaned up after tool exits; stale dirs swept on daemon startup
+5. **Socket requires UID match** — only the configured user can connect
+6. **Binary path is verified** — by default executable resolution is fail-closed
+7. **Requests are replay-protected** — duplicate HMACs within TTL are rejected; nonce included in HMAC (protocol v3)
+8. **Error messages are sanitized** — internal paths, versions, and tool names are not leaked to the client
+9. **Environment denylist** — dangerous env vars (LD_*, DYLD_*, proxy vars, language runtime vars, git hijack vars) are stripped
+10. **Credential values are YAML-escaped** — prevents config file injection via malicious secret values
+11. **Working directory must be absolute** — relative paths are rejected
+12. **Secret file symlink protection** — WriteSecret/LoadSecret refuse to operate on symlinks
+13. **pass binary must be absolute path** — relative paths fall back to default with a warning

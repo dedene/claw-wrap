@@ -108,9 +108,6 @@ proxy:
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
 
-security:
-  allow_unverified_caller_exe: false
-
 credentials:
   github-token:
     source: pass:cli/github/token
@@ -193,7 +190,7 @@ The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited e
 
 - HMAC signature covers `tool`, `args`, `cwd`, and request `env` (protocol v2).
 - Requests are replay-protected with a short-lived daemon cache.
-- Caller executable verification is fail-closed by default (`allow_unverified_caller_exe: false`).
+- Caller executable verification is best-effort by default. Set `deny_unverified_caller_exe: true` for strict mode.
 
 ## Sandbox Setup
 

@@ -15,10 +15,10 @@ import (
 	"io"
 )
 
-// MaxMessageSize is the maximum allowed message size (256 MB).
-// This needs to be large enough for CLI tools that output large responses
-// (e.g., gh api calls, large file listings).
-const MaxMessageSize = 256 * 1024 * 1024
+// MaxMessageSize is the maximum allowed message size (16 MB).
+// Output is already chunked, so individual frames don't need to be huge.
+// 16 MB is generous for any single response frame.
+const MaxMessageSize = 16 * 1024 * 1024
 
 // ErrMessageTooLarge is returned when a message exceeds MaxMessageSize.
 var ErrMessageTooLarge = errors.New("message exceeds maximum size")

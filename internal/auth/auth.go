@@ -56,10 +56,18 @@ func GenerateSecret() ([]byte, error) {
 
 // WriteSecret writes the secret to the specified path with 0600 permissions.
 // It uses an atomic write via a temporary file to prevent partial writes.
+// It refuses to write if the target path is a symlink (prevents symlink attacks).
 func WriteSecret(path string, secret []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	// Check for symlink at target path to prevent symlink attacks
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write secret: %s is a symlink", path)
+		}
 	}
 
 	// Create temp file in the same directory for atomic rename
@@ -104,7 +112,15 @@ func WriteSecret(path string, secret []byte) error {
 
 // LoadSecret reads and decodes the secret from the specified file path.
 // The file is expected to contain a base64-encoded secret.
+// It refuses to read if the path is a symlink (prevents symlink attacks).
 func LoadSecret(path string) ([]byte, error) {
+	// Check for symlink before reading
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("refusing to read secret: %s is a symlink", path)
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -123,16 +139,31 @@ func LoadSecret(path string) ([]byte, error) {
 	return secret, nil
 }
 
+// NonceSize is the size of the request nonce in bytes.
+const NonceSize = 16
+
+// GenerateNonce creates a cryptographically random 16-byte nonce
+// encoded as base64 for inclusion in requests.
+func GenerateNonce() (string, error) {
+	nonce := make([]byte, NonceSize)
+	_, err := rand.Read(nonce)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(nonce), nil
+}
+
 // ComputeHMAC computes an HMAC-SHA256 signature over:
-// timestamp + tool + json(args) + cwd + json({}).
+// timestamp + tool + json(args) + cwd + json({}) + nonce.
 // For env-aware signing, use ComputeHMACWithEnv.
-func ComputeHMAC(secret []byte, timestamp, tool, cwd string, args []string) (string, error) {
-	return ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, nil)
+func ComputeHMAC(secret []byte, timestamp, tool, cwd string, args []string, nonce string) (string, error) {
+	return ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, nil, nonce)
 }
 
 // ComputeHMACWithEnv computes an HMAC-SHA256 signature over:
-// timestamp + tool + json(args) + cwd + json(env canonical).
-func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string) (string, error) {
+// timestamp + tool + json(args) + cwd + json(env canonical) + nonce.
+// Fields are separated by newlines to prevent boundary confusion.
+func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, nonce string) (string, error) {
 	// Serialize args as JSON for consistent encoding
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
@@ -144,8 +175,8 @@ func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []strin
 		return "", fmt.Errorf("failed to marshal env: %w", err)
 	}
 
-	// Build the message to sign
-	message := timestamp + tool + string(argsJSON) + cwd + envJSON
+	// Build the message to sign — fields separated by \n to prevent boundary confusion
+	message := timestamp + "\n" + tool + "\n" + string(argsJSON) + "\n" + cwd + "\n" + envJSON + "\n" + nonce
 
 	// Compute HMAC-SHA256
 	mac := hmac.New(sha256.New, secret)
@@ -160,19 +191,19 @@ func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []strin
 // that the timestamp is within the allowed freshness window.
 // VerifyHMAC verifies signature using an empty env object.
 // For env-aware verification, use VerifyHMACWithEnv.
-func VerifyHMAC(secret []byte, timestamp, tool, cwd string, args []string, providedHMAC string) error {
-	return VerifyHMACWithEnv(secret, timestamp, tool, cwd, args, nil, providedHMAC)
+func VerifyHMAC(secret []byte, timestamp, tool, cwd string, args []string, nonce, providedHMAC string) error {
+	return VerifyHMACWithEnv(secret, timestamp, tool, cwd, args, nil, nonce, providedHMAC)
 }
 
 // VerifyHMACWithEnv verifies the provided HMAC signature with env included.
-func VerifyHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, providedHMAC string) error {
+func VerifyHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, nonce, providedHMAC string) error {
 	// First validate timestamp freshness
 	if err := ValidateTimestamp(timestamp); err != nil {
 		return err
 	}
 
 	// Compute expected HMAC
-	expectedHMAC, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, env)
+	expectedHMAC, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, env, nonce)
 	if err != nil {
 		return fmt.Errorf("failed to compute expected HMAC: %w", err)
 	}

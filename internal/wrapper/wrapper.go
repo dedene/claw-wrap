@@ -70,10 +70,14 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 		return fmt.Errorf("get cwd: %w", err)
 	}
 
-	// 3. Compute timestamp and HMAC
+	// 3. Compute timestamp, nonce, and HMAC
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce, err := auth.GenerateNonce()
+	if err != nil {
+		return fmt.Errorf("generate nonce: %w", err)
+	}
 	var reqEnv map[string]string
-	hmac, err := auth.ComputeHMACWithEnv(secret, timestamp, toolName, cwd, args, reqEnv)
+	hmac, err := auth.ComputeHMACWithEnv(secret, timestamp, toolName, cwd, args, reqEnv, nonce)
 	if err != nil {
 		return fmt.Errorf("compute hmac: %w", err)
 	}
@@ -92,6 +96,7 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 		Args:      args,
 		Cwd:       cwd,
 		Timestamp: timestamp,
+		Nonce:     nonce,
 		HMAC:      hmac,
 		Env:       reqEnv,
 	}
@@ -288,7 +293,11 @@ func (w *Wrapper) buildAdminRequest(command string) (*protocol.AdminRequest, err
 	}
 
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	hmac, err := auth.ComputeHMAC(secret, timestamp, "admin:"+command, "", nil)
+	nonce, err := auth.GenerateNonce()
+	if err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	hmac, err := auth.ComputeHMAC(secret, timestamp, "admin:"+command, "", nil, nonce)
 	if err != nil {
 		return nil, fmt.Errorf("compute hmac: %w", err)
 	}
@@ -297,6 +306,7 @@ func (w *Wrapper) buildAdminRequest(command string) (*protocol.AdminRequest, err
 		Version:   protocol.ProtocolVersion,
 		Admin:     command,
 		Timestamp: timestamp,
+		Nonce:     nonce,
 		HMAC:      hmac,
 	}, nil
 }
