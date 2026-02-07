@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"claw-wrap/internal/paths"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,8 +20,6 @@ const (
 	DefaultTimeout = 5 * time.Minute
 	// DefaultInlineThreshold is the default inline threshold (1MB).
 	DefaultInlineThreshold int64 = 1 << 20
-	// DefaultHMACSecretFile is the default HMAC secret file path.
-	DefaultHMACSecretFile = "/run/openclaw/auth"
 	// DefaultMaxConnections is the default max concurrent daemon connections.
 	DefaultMaxConnections = 64
 	// DefaultReadHeaderTimeout is the timeout for reading the first request frame.
@@ -37,8 +36,8 @@ const (
 	DefaultWriteTimeout = 30 * time.Second
 )
 
-// DefaultConfigPath is the default location for wrappers.yaml.
-const DefaultConfigPath = "/etc/openclaw/wrappers.yaml"
+// DefaultConfigPath returns the default location for wrappers.yaml.
+var DefaultConfigPath = paths.ConfigPath()
 
 // ProxyConfig holds proxy-related configuration.
 type ProxyConfig struct {
@@ -322,7 +321,7 @@ func (c *Config) GetInlineThreshold() int64 {
 // GetHMACSecretFile returns the HMAC secret file path or the default.
 func (c *Config) GetHMACSecretFile() string {
 	if c.Proxy == nil || c.Proxy.HMACSecretFile == "" {
-		return DefaultHMACSecretFile
+		return paths.AuthPath()
 	}
 	return c.Proxy.HMACSecretFile
 }
@@ -333,11 +332,11 @@ func (c *Config) GetPassBinary() string {
 	if c.Proxy != nil && c.Proxy.PassBinary != "" {
 		if !filepath.IsAbs(c.Proxy.PassBinary) {
 			log.Printf("[WARN] pass_binary %q is not absolute, using default", c.Proxy.PassBinary)
-			return "/usr/bin/pass"
+			return paths.DefaultPassBinary()
 		}
 		return c.Proxy.PassBinary
 	}
-	return "/usr/bin/pass"
+	return paths.DefaultPassBinary()
 }
 
 // DenyUnverifiedCallerExe returns whether to reject connections when

@@ -9,10 +9,12 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"claw-wrap/internal/paths"
 )
 
 // DefaultEnvFile is the path to the env file with service credentials.
-const DefaultEnvFile = "/run/openclaw/env"
+var DefaultEnvFile = paths.EnvFile()
 
 // FetchOptions holds configuration for credential fetching.
 type FetchOptions struct {
@@ -36,7 +38,7 @@ func WithPassBinary(path string) FetchOption {
 //   - path/in/store - legacy format, assumed to be pass
 func Fetch(source string, opts ...FetchOption) (string, error) {
 	options := &FetchOptions{
-		PassBinary: "/usr/bin/pass",
+		PassBinary: paths.DefaultPassBinary(),
 	}
 	for _, opt := range opts {
 		opt(options)

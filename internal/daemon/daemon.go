@@ -19,11 +19,12 @@ import (
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
 	"claw-wrap/internal/framing"
+	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
 )
 
 // DefaultSocketPath is the default Unix socket path.
-const DefaultSocketPath = "/run/openclaw/secrets.sock"
+var DefaultSocketPath = paths.SocketPath()
 
 // Ucred holds Unix peer credentials.
 type Ucred struct {
@@ -90,7 +91,7 @@ func New(opts ...Option) *Daemon {
 	d := &Daemon{
 		socketPath:      DefaultSocketPath,
 		configPath:      config.DefaultConfigPath,
-		allowedUID:      1000, // Default UID (typically first non-root user)
+		allowedUID:      uint32(os.Getuid()),
 		allowedBinaries: []string{selfPath},
 		metrics:         newSecurityMetrics(),
 	}
@@ -120,7 +121,7 @@ func (d *Daemon) Run() error {
 	}
 	log.Printf("[INFO] HMAC secret written to %s", secretPath)
 
-	runtimeDir := "/run/openclaw"
+	runtimeDir := paths.RuntimeDir()
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return fmt.Errorf("create runtime dir: %w", err)
 	}

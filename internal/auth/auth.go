@@ -21,9 +21,6 @@ import (
 )
 
 const (
-	// DefaultSecretPath is the default location for the HMAC secret file.
-	DefaultSecretPath = "/run/openclaw/auth"
-
 	// MaxTimestampDrift is the maximum allowed time difference between
 	// the timestamp in a request and the current time.
 	MaxTimestampDrift = 5 * time.Second

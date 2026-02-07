@@ -21,6 +21,7 @@ import (
 
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/daemon"
+	"claw-wrap/internal/paths"
 	"claw-wrap/internal/wrapper"
 )
 
@@ -94,16 +95,17 @@ func runDaemon() error {
 			opts = append(opts, daemon.WithAllowedUID(uid))
 			i++
 		case arg == "-h" || arg == "--help":
-			fmt.Println(`claw-wrap daemon - Start the secrets daemon
+			fmt.Printf(`claw-wrap daemon - Start the secrets daemon
 
 Usage:
   claw-wrap daemon [options]
 
 Options:
-  --socket PATH   Socket path (default: /run/openclaw/secrets.sock)
-  --config PATH   Config path (default: /etc/openclaw/wrappers.yaml)
-  --uid UID       Allowed UID (default: 1000)
-  -h, --help      Show this help`)
+  --socket PATH   Socket path (default: %s)
+  --config PATH   Config path (default: %s)
+  --uid UID       Allowed UID (default: %d)
+  -h, --help      Show this help
+`, paths.SocketPath(), paths.ConfigPath(), os.Getuid())
 			return nil
 		}
 	}
@@ -232,7 +234,7 @@ func runInstall() error {
 
 func warnVersionMismatch(daemonVersion string) {
 	if daemonVersion != "" && daemonVersion != version {
-		fmt.Fprintf(os.Stderr, "Warning: daemon is %s, client is %s — restart daemon:\n  sudo systemctl restart claw-wrap\n\n", daemonVersion, version)
+		fmt.Fprintf(os.Stderr, "Warning: daemon is %s, client is %s — restart daemon:\n  %s\n\n", daemonVersion, version, paths.RestartHint())
 	}
 }
 

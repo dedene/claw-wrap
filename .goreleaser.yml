@@ -7,6 +7,7 @@ builds:
       - -s -w -X main.version={{.Version}}
     goos:
       - linux
+      - darwin
     goarch:
       - amd64
       - arm64
@@ -14,30 +15,27 @@ builds:
 archives:
   - formats:
       - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
     files:
       - LICENSE
       - README.md
-      - init/claw-wrap.service
+      - init/*
 
 checksum:
-  name_template: "checksums.txt"
+  name_template: 'checksums.txt'
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - "^docs:"
-      - "^style:"
+      - '^docs:'
+      - '^style:'
 
 brews:
   - repository:
       owner: dedene
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    commit_author:
-      name: Peter Dedene
-      email: peter@dedene.com
+      token: '{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}'
     directory: Formula
     homepage: https://github.com/dedene/claw-wrap
     description: Credential proxy for CLI tools — secrets never enter the sandbox

@@ -15,14 +15,8 @@ import (
 
 	"claw-wrap/internal/auth"
 	"claw-wrap/internal/framing"
+	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
-)
-
-const (
-	// DefaultSocketPath is the default daemon socket path.
-	DefaultSocketPath = "/run/openclaw/secrets.sock"
-	// DefaultAuthPath is the default HMAC secret path.
-	DefaultAuthPath = "/run/openclaw/auth"
 )
 
 // Wrapper is the client that communicates with the daemon.
@@ -47,8 +41,8 @@ func WithAuthPath(path string) Option {
 // New creates a new wrapper with the given options.
 func New(opts ...Option) *Wrapper {
 	w := &Wrapper{
-		socketPath: DefaultSocketPath,
-		authPath:   DefaultAuthPath,
+		socketPath: paths.SocketPath(),
+		authPath:   paths.AuthPath(),
 	}
 	for _, opt := range opts {
 		opt(w)

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"claw-wrap/internal/paths"
 )
 
 func TestValidate_ValidBlockedArgs(t *testing.T) {
@@ -137,12 +139,12 @@ func TestGetPassBinary(t *testing.T) {
 		{
 			name: "nil proxy returns default",
 			cfg:  Config{},
-			want: "/usr/bin/pass",
+			want: paths.DefaultPassBinary(),
 		},
 		{
 			name: "empty pass_binary returns default",
 			cfg:  Config{Proxy: &ProxyConfig{}},
-			want: "/usr/bin/pass",
+			want: paths.DefaultPassBinary(),
 		},
 		{
 			name: "configured path returned",
@@ -181,12 +183,12 @@ func TestLoad_PassBinaryFromYAML(t *testing.T) {
 		{
 			name: "no proxy section",
 			yaml: "tools: {}\n",
-			want: "/usr/bin/pass",
+			want: paths.DefaultPassBinary(),
 		},
 		{
 			name: "proxy without pass_binary",
 			yaml: "proxy:\n  timeout: 60s\ntools: {}\n",
-			want: "/usr/bin/pass",
+			want: paths.DefaultPassBinary(),
 		},
 	}
 
@@ -557,11 +559,11 @@ func TestGetPassBinary_AbsolutePathValidation(t *testing.T) {
 		cfg  *Config
 		want string
 	}{
-		{"nil proxy", &Config{}, "/usr/bin/pass"},
-		{"empty", &Config{Proxy: &ProxyConfig{}}, "/usr/bin/pass"},
+		{"nil proxy", &Config{}, paths.DefaultPassBinary()},
+		{"empty", &Config{Proxy: &ProxyConfig{}}, paths.DefaultPassBinary()},
 		{"absolute path", &Config{Proxy: &ProxyConfig{PassBinary: "/usr/local/bin/pass"}}, "/usr/local/bin/pass"},
-		{"relative path rejected", &Config{Proxy: &ProxyConfig{PassBinary: "pass"}}, "/usr/bin/pass"},
-		{"relative with dir rejected", &Config{Proxy: &ProxyConfig{PassBinary: "./bin/pass"}}, "/usr/bin/pass"},
+		{"relative path rejected", &Config{Proxy: &ProxyConfig{PassBinary: "pass"}}, paths.DefaultPassBinary()},
+		{"relative with dir rejected", &Config{Proxy: &ProxyConfig{PassBinary: "./bin/pass"}}, paths.DefaultPassBinary()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
