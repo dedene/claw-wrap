@@ -20,7 +20,12 @@ RuntimeDirectoryPreserve=yes
 # GPG uses $HOME/.gnupg by default. If your GPG home is elsewhere, add:
 #   Environment=GNUPGHOME=/path/to/.gnupg
 
-# Security hardening
+# ── Security hardening ──────────────────────────────────────────────
+# claw-wrap spawns child processes (gh, bird, gog, …) that inherit
+# all restrictions below. Only enable options compatible with the
+# tools you configure.
+#
+# SAFE — restrict daemon + children without breaking tools:
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
@@ -32,12 +37,22 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
 RestrictNamespaces=true
-RestrictAddressFamilies=AF_UNIX
 UMask=0077
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+
+# TOOL-DEPENDENT — adjust based on your configured tools:
+#
+# Network access: tools that call external APIs (gh, gog, strawpoll)
+# need AF_INET/AF_INET6. Only use AF_UNIX alone if ALL tools are
+# local/offline.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+#
+# JIT memory: Node.js (bird), Python, and other runtimes with JIT
+# compilers need writable+executable memory. Set to true only if
+# none of your tools use JIT runtimes.
+MemoryDenyWriteExecute=false
 
 [Install]
 WantedBy=multi-user.target

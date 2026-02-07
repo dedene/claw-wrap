@@ -163,6 +163,19 @@ sudo make install
 sudo systemctl restart claw-wrap
 ```
 
+### Tools crash or fail after systemd hardening
+
+The daemon spawns tool processes that inherit all systemd security restrictions.
+Common symptoms:
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| V8/Node.js crash (`ENOMEM` in `SetPermissions`) | `MemoryDenyWriteExecute=true` | Set to `false` |
+| "token invalid" / network errors | `RestrictAddressFamilies=AF_UNIX` | Add `AF_INET AF_INET6` |
+| Tool hangs or gets killed | `SystemCallFilter` too strict | Check `journalctl` for SECCOMP audit messages |
+
+After changes: `sudo systemctl daemon-reload && sudo systemctl restart claw-wrap`
+
 ### Credential fetch fails
 
 ```bash
