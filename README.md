@@ -129,7 +129,7 @@ sudo systemctl enable --now claw-wrap
 sudo claw-wrap install
 ```
 
-This creates `/usr/local/bin/gh → /usr/local/bin/claw-wrap`.
+This creates `/usr/local/bin/gh → /usr/local/bin/claw-wrap`. Make sure `/usr/local/bin` comes first in your PATH so the symlink is found before the real binary.
 
 ### 6. Verify
 

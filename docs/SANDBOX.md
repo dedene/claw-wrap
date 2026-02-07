@@ -219,6 +219,26 @@ The path unit starts automatically with the gateway (via `WantedBy=openclaw-gate
 7. Gateway comes back up with the new version
 ```
 
+## PATH Priority
+
+The claw-wrap symlinks in `/usr/local/bin` must come **before** the real binaries in PATH. Otherwise the agent calls the real `gh` directly, bypassing claw-wrap entirely.
+
+The firejail profile's `env PATH=...` line already puts `/usr/local/bin` first. But your agent framework must also respect this. In OpenClaw, configure `pathPrepend` in `openclaw.json`:
+
+```json
+{
+  "tools": {
+    "exec": {
+      "pathPrepend": [
+        "/usr/local/bin"
+      ]
+    }
+  }
+}
+```
+
+This prepends `/usr/local/bin` to PATH for all tool executions, ensuring the agent always hits the claw-wrap symlink first.
+
 ## Verifying Isolation
 
 After the gateway is running, verify from inside the sandbox:
