@@ -98,10 +98,14 @@ sudo systemctl enable --now claw-wrap
 ## Create tool symlinks
 
 ```bash
-sudo claw-wrap install
+sudo $(which claw-wrap) install
 ```
 
-This creates symlinks in `/usr/local/bin/` for every tool in your config. For example, `gh → claw-wrap`.
+This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wrap` binary. For example, `gh → /home/linuxbrew/.linuxbrew/bin/claw-wrap`. Use `$(which claw-wrap)` so sudo resolves YOUR binary (sudo's PATH may differ). To install symlinks in a different directory:
+
+```bash
+sudo claw-wrap install --install-dir /usr/local/bin
+```
 
 ## Verify
 
@@ -152,8 +156,8 @@ sudo -u <your-user> gpg --decrypt ~/.password-store/cli/github/token.gpg
 
 ### Symlink conflicts
 
-If `/usr/local/bin/gh` already exists (real `gh` binary):
-- Move the real binary: `sudo mv /usr/local/bin/gh /usr/local/bin/gh-real`
+If `gh` already exists in the install directory (real `gh` binary):
+- Move the real binary: `sudo mv $(which gh) $(which gh)-real`
 - Update `binary:` in config to point to the new path
 - Re-run `sudo claw-wrap install`
 

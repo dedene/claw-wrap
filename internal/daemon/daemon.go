@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -62,11 +63,19 @@ func WithAllowedBinaries(binaries []string) Option {
 
 // New creates a new daemon with the given options.
 func New(opts ...Option) *Daemon {
+	// Auto-detect own binary path; fall back to common default
+	selfPath := "/usr/local/bin/claw-wrap"
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			selfPath = resolved
+		}
+	}
+
 	d := &Daemon{
-		socketPath:     DefaultSocketPath,
-		configPath:     config.DefaultConfigPath,
-		allowedUID:     1000, // Default UID (typically first non-root user)
-		allowedBinaries: []string{"/usr/local/bin/claw-wrap"},
+		socketPath:      DefaultSocketPath,
+		configPath:      config.DefaultConfigPath,
+		allowedUID:      1000, // Default UID (typically first non-root user)
+		allowedBinaries: []string{selfPath},
 	}
 	for _, opt := range opts {
 		opt(d)

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"claw-wrap/internal/config"
 	"claw-wrap/internal/daemon"
 	"claw-wrap/internal/wrapper"
 )
@@ -154,28 +155,54 @@ func runCheck() error {
 }
 
 func runInstall() error {
-	w := wrapper.New()
-	resp, err := w.List()
+	// Parse flags
+	var installDir, configPath string
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--install-dir" && i+1 < len(os.Args):
+			installDir = os.Args[i+1]
+			i++
+		case os.Args[i] == "--config" && i+1 < len(os.Args):
+			configPath = os.Args[i+1]
+			i++
+		}
+	}
+
+	// Read tool list directly from config (no daemon needed)
+	if configPath == "" {
+		configPath = config.DefaultConfigPath
+	}
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
 
-	installDir := "/usr/local/bin"
-	clawWrapPath := filepath.Join(installDir, "claw-wrap")
-
-	if _, err := os.Stat(clawWrapPath); os.IsNotExist(err) {
-		return fmt.Errorf("claw-wrap not installed at %s", clawWrapPath)
+	if len(cfg.Tools) == 0 {
+		return fmt.Errorf("no tools configured in %s", configPath)
 	}
 
-	fmt.Println("Installing symlinks...")
+	// Auto-detect claw-wrap binary path (symlink target)
+	clawWrapPath, err := selfExePath()
+	if err != nil {
+		return err
+	}
 
-	for toolName := range resp.Tools {
+	// Symlink directory: explicit flag or /usr/local/bin default
+	if installDir == "" {
+		installDir = "/usr/local/bin"
+	}
+
+	fmt.Printf("Installing symlinks in %s -> %s\n", installDir, clawWrapPath)
+
+	var installed, failed int
+	for toolName := range cfg.Tools {
 		linkPath := filepath.Join(installDir, toolName)
 
 		// Remove existing file/symlink
 		if _, err := os.Lstat(linkPath); err == nil {
 			if err := os.Remove(linkPath); err != nil {
 				fmt.Printf("  %-12s FAILED (remove: %v)\n", toolName, err)
+				failed++
 				continue
 			}
 		}
@@ -183,14 +210,32 @@ func runInstall() error {
 		// Create symlink
 		if err := os.Symlink(clawWrapPath, linkPath); err != nil {
 			fmt.Printf("  %-12s FAILED (symlink: %v)\n", toolName, err)
+			failed++
 			continue
 		}
 
 		fmt.Printf("  %-12s -> claw-wrap\n", toolName)
+		installed++
 	}
 
-	fmt.Println("Done.")
+	if failed > 0 {
+		return fmt.Errorf("%d/%d symlinks failed — try:\n  sudo $(which claw-wrap) install", failed, installed+failed)
+	}
+	fmt.Printf("Done. %d symlinks installed.\n", installed)
 	return nil
+}
+
+// selfExePath returns the resolved absolute path of the running binary.
+func selfExePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("detect executable path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve executable path: %w", err)
+	}
+	return resolved, nil
 }
 
 func printHelp() {
@@ -204,7 +249,7 @@ Commands:
   daemon     Start the secrets daemon
   list       List configured tools
   check      Verify all credentials are accessible
-  install    Create symlinks for all configured tools
+  install [--install-dir DIR] [--config PATH]  Create symlinks
   version    Show version
   help       Show this help
 

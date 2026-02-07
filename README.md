@@ -126,10 +126,10 @@ sudo systemctl enable --now claw-wrap
 ### 5. Create the symlink
 
 ```bash
-sudo claw-wrap install
+sudo $(which claw-wrap) install
 ```
 
-This creates `/usr/local/bin/gh → /usr/local/bin/claw-wrap`. Make sure `/usr/local/bin` comes first in your PATH so the symlink is found before the real binary.
+This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wrap` binary. The `$(which claw-wrap)` ensures sudo uses YOUR claw-wrap, not a stale copy. Override the symlink directory with `--install-dir`:
 
 ### 6. Verify
 
@@ -205,7 +205,8 @@ claw-wrap daemon
 # Admin commands
 claw-wrap list      # List configured tools
 claw-wrap check     # Verify credentials
-claw-wrap install   # Create symlinks (requires sudo)
+claw-wrap install   # Create symlinks (auto-detects directory)
+claw-wrap install --install-dir /usr/local/bin  # Override directory
 claw-wrap version   # Show version
 claw-wrap help      # Show help
 
