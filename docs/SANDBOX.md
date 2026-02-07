@@ -284,3 +284,53 @@ touch /run/openclaw/restart
 # Watch the gateway restart:
 sudo journalctl -u openclaw-gateway -f
 ```
+
+---
+
+## macOS: nono
+
+[Firejail](https://firejail.wordpress.com/) is Linux-only. For macOS, [nono](https://github.com/lukehinds/nono) provides kernel-enforced sandboxing via Apple's Seatbelt (the same technology behind App Sandbox). It's deny-by-default — sensitive paths like `~/.ssh`, `~/.gnupg`, `~/.password-store`, and `~/.aws` are blocked automatically.
+
+> **Note:** nono is early alpha and has not undergone a security audit. It also works on Linux (via Landlock) as an alternative to firejail.
+
+### Install nono
+
+```bash
+brew install lukehinds/tap/nono
+```
+
+### Socket path on macOS
+
+macOS has no `/run/` directory. nono's built-in `openclaw` profile allows `$TMPDIR/openclaw-$UID` for runtime files. Start the claw-wrap daemon with a custom socket path:
+
+```bash
+# Create runtime directory
+mkdir -p /tmp/openclaw-$(id -u)
+
+# Start daemon with macOS socket path
+claw-wrap daemon --socket /tmp/openclaw-$(id -u)/secrets.sock
+```
+
+### Using the built-in profile
+
+nono ships with a built-in `openclaw` profile:
+
+```bash
+nono run --profile openclaw -- openclaw gateway
+```
+
+This grants read+write to `~/.openclaw`, `~/.config/openclaw`, `~/.local`, and `$TMPDIR/openclaw-$UID` (the socket directory).
+
+### Custom setup
+
+For more control, specify paths explicitly:
+
+```bash
+nono run \
+  --allow ~/.openclaw \
+  --allow /tmp/openclaw-$(id -u) \
+  --read /usr/local/bin \
+  -- node ~/.npm-global/lib/node_modules/openclaw/dist/index.js gateway
+```
+
+The `--allow` flag grants recursive read+write access. Only listed paths are accessible — everything else (including credential stores) is invisible to the sandboxed process.

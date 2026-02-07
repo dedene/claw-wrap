@@ -182,15 +182,18 @@ The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited e
 
 ## Sandbox Setup
 
-claw-wrap is designed to work with [firejail](https://firejail.wordpress.com/) in **whitelist mode** (deny-by-default). The sandbox can access `/run/openclaw` (socket + auth file) but NOT `~/.password-store`, `~/.gnupg`, or `~/.ssh`.
+claw-wrap works with deny-by-default sandboxes where credentials directories (`~/.password-store`, `~/.gnupg`, `~/.ssh`) are not accessible:
 
-See [docs/SANDBOX.md](docs/SANDBOX.md) for the full guide, including a production firejail profile for [OpenClaw](https://github.com/openclaw/openclaw) and a self-restart mechanism that lets the sandboxed gateway update itself.
+- **Linux**: [firejail](https://firejail.wordpress.com/) in whitelist mode
+- **macOS**: [nono](https://github.com/lukehinds/nono) using Apple's Seatbelt
+
+See [docs/SANDBOX.md](docs/SANDBOX.md) for the full guide — firejail profile, nono setup, self-restart mechanism, and verification steps.
 
 ## Documentation
 
 - [Installation Guide](docs/INSTALL.md) — full setup with `pass`, systemd, and troubleshooting
 - [Configuration Reference](docs/CONFIG.md) — all options for credentials, tools, blocked args, config file injection
-- [Sandbox Setup](docs/SANDBOX.md) — firejail whitelist profile with verification steps
+- [Sandbox Setup](docs/SANDBOX.md) — firejail (Linux) and nono (macOS) with verification steps
 - [Protocol Specification](docs/SPEC.md) — HMAC authentication, message framing, proxy protocol
 
 ## Usage
@@ -226,9 +229,9 @@ make clean    # Remove build artifacts
 ## Requirements
 
 - Go 1.21+ (building from source)
-- Linux with systemd
+- Linux with systemd (or macOS with launchd)
 - `pass` (password-store) + GPG
-- [firejail](https://firejail.wordpress.com/) (recommended)
+- [firejail](https://firejail.wordpress.com/) (Linux) or [nono](https://github.com/lukehinds/nono) (macOS)
 
 ## License
 
