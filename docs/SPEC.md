@@ -44,12 +44,13 @@ All requests must include an HMAC signature for authentication.
 
 **Secret provisioning**:
 - Daemon generates random 32-byte secret on startup
-- Written to `/run/openclaw/auth` with mode 0640
+- Written to `/run/openclaw/auth` with mode 0600
 - Bind-mounted read-only into sandbox by firejail
 
 **Signature scope**:
 ```
 HMAC-SHA256(secret, timestamp + tool + args_json + cwd)
+HMAC-SHA256(secret, timestamp + tool + args_json + cwd + env_json)
 ```
 
 Where:
@@ -57,6 +58,7 @@ Where:
 - `tool`: Tool name (e.g., "gog")
 - `args_json`: JSON-encoded args array (e.g., `["gmail","list"]`)
 - `cwd`: Working directory path
+- `env_json`: Canonical JSON object of request env (keys sorted)
 
 **Validation**:
 - Daemon rejects requests where `|now - timestamp| > 5 seconds`
@@ -67,8 +69,8 @@ Where:
 
 ```
 1. Wrapper reads secret from /run/openclaw/auth
-2. Wrapper computes HMAC(secret, timestamp + tool + args + cwd)
-3. Request includes: {tool, args, cwd, timestamp, hmac}
+2. Wrapper computes HMAC(secret, timestamp + tool + args + cwd + env)
+3. Request includes: {version, tool, args, cwd, timestamp, hmac, env}
 4. Daemon verifies UID via SO_PEERCRED
 5. Daemon verifies timestamp freshness (±5s)
 6. Daemon verifies HMAC signature
@@ -83,6 +85,7 @@ Requests are newline-delimited JSON (one JSON object per line):
 
 ```json
 {
+  "version": 2,
   "tool": "gog",
   "args": ["gmail", "list"],
   "cwd": "/home/user/project",
@@ -96,6 +99,7 @@ Requests are newline-delimited JSON (one JSON object per line):
 
 **Fields**:
 - `tool` (required): Tool name as defined in wrappers.yaml
+- `version` (required): Protocol version (currently `2`)
 - `args` (required): Array of string arguments
 - `cwd` (required): Working directory for tool execution
 - `timestamp` (required): Unix epoch seconds for HMAC
@@ -132,10 +136,8 @@ Responses use length-prefixed framing for binary safety:
 {"type": "done", "exit_code": 0}
 ```
 
-#### Large Output (Temp File)
-```json
-{"type": "file", "stream": "stdout", "path": "/run/openclaw/out-abc123"}
-```
+#### Large Output
+Large outputs are buffered in daemon temp files internally and re-streamed as `stdout`/`stderr` chunks. Temp file paths are never exposed to the wrapper.
 
 ### 3.3 Stdin Forwarding
 
@@ -199,12 +201,12 @@ Tool runs in the `cwd` specified by the request. Daemon verifies the path exists
 **Temp file mode** (for large output):
 - If accumulated output exceeds `inline_threshold`, switch to temp file
 - Temp file written to daemon's PrivateTmp (`/tmp`)
-- Path returned in `{"type": "file", ...}` message
-- Sandbox reads file directly (bind-mounted)
+- Daemon re-streams file contents as chunked stdout/stderr messages
+- Temp path never leaves daemon memory/protocol
 
 **Cleanup**:
-- Wrapper sends `{"type": "cleanup", "files": ["/path1", "/path2"]}`
-- Daemon deletes files on socket disconnect (fallback)
+- Wrapper `cleanup` messages are compatibility no-ops
+- Daemon performs all temp file cleanup server-side
 
 ### 4.6 Config File Injection
 
@@ -225,6 +227,15 @@ proxy:
   timeout: 300s              # Global default timeout
   inline_threshold: 1MB      # Switch to temp file above this
   hmac_secret_file: /run/openclaw/auth  # Path to HMAC secret
+  max_connections: 64
+  read_header_timeout: 3s
+  read_message_timeout: 15s
+  max_stdin_message_size: 1MB
+  replay_cache_ttl: 2m
+  replay_cache_max_entries: 10000
+
+security:
+  allow_unverified_caller_exe: false
 ```
 
 ### 5.2 Per-Tool Configuration
@@ -292,26 +303,29 @@ tools:
 
 1. Load configuration from `/etc/openclaw/wrappers.yaml`
 2. Generate random 32-byte HMAC secret
-3. Write secret to `hmac_secret_file` (mode 0640)
-4. Create Unix socket at `/run/openclaw/secrets.sock`
+3. Write secret to `hmac_secret_file` (mode 0600)
+4. Create Unix socket at `/run/openclaw/secrets.sock` (mode 0600)
 5. Accept connections
 
 ### 6.2 Request Handling
 
 1. Accept connection
 2. Verify UID via SO_PEERCRED
-3. Read NDJSON request
-4. Verify timestamp freshness (±5s)
-5. Verify HMAC signature
-6. Validate tool exists in config
-7. Check blocked_args patterns
-8. Resolve credentials from sources
-9. Spawn tool in new process group
-10. Stream stdout/stderr to client
-11. Forward stdin from client
-12. Handle signals from client
-13. Send exit code on completion
-14. Clean up temp files on disconnect
+3. Resolve caller executable path and enforce allowlist (fail closed by default)
+4. Read NDJSON request (with read deadline + size limit)
+5. Verify protocol version
+6. Verify timestamp freshness (±5s)
+7. Verify HMAC signature
+8. Enforce replay cache
+9. Validate tool exists in config
+10. Check blocked_args patterns
+11. Resolve credentials from sources
+12. Spawn tool in new process group
+13. Stream stdout/stderr to client
+14. Forward stdin from client
+15. Handle signals from client
+16. Send exit code on completion
+17. Clean up temp files server-side
 
 ### 6.3 Logging
 
@@ -368,7 +382,6 @@ while connection open:
 
 - `stdout` messages: write data to os.Stdout
 - `stderr` messages: write data to os.Stderr
-- `file` messages: read temp file, write to appropriate fd
 - `done` message: exit with provided exit_code
 
 ### 7.4 Signal Handling
@@ -379,9 +392,7 @@ while connection open:
 
 ### 7.5 Cleanup
 
-On exit (normal or error):
-- Send cleanup message for any temp files received
-- Close socket connection
+On exit (normal or error): close socket connection.
 
 ### 7.6 Error Handling
 
@@ -396,7 +407,7 @@ On exit (normal or error):
 **Protected against**:
 - Malicious code in sandbox extracting credentials
 - Replay attacks (5-second timestamp window)
-- Request tampering (HMAC covers full request)
+- Request tampering (HMAC covers args/cwd/env)
 - Unauthorized tools (blocked_args enforcement)
 
 **Not protected against**:
@@ -409,19 +420,19 @@ On exit (normal or error):
 
 1. **UID verification**: Only configured user can connect
 2. **HMAC authentication**: Prevents unauthorized requests
-3. **Blocked args**: Server-side enforcement of restrictions
-4. **Forced env**: Agent cannot override security settings
-5. **No credential exposure**: Credentials never enter sandbox
-6. **Process isolation**: Tools run in separate process groups
+3. **Replay cache**: Duplicate authenticated requests are rejected
+4. **Blocked args**: Server-side enforcement of restrictions
+5. **Forced env**: Agent cannot override security settings
+6. **No credential exposure**: Credentials never enter sandbox
+7. **Process isolation**: Tools run in separate process groups
 
 ### 8.3 Secret File Permissions
 
 ```
-/run/openclaw/auth: 0640 <user>:<user>
-/run/openclaw/secrets.sock: 0666 root:root
+/run/openclaw/auth: 0600 <user>:<user>
+/run/openclaw/secrets.sock: 0600 <user>:<user>
 ```
 
-The socket is world-writable but protected by UID verification via SO_PEERCRED.
 Firejail profile must bind-mount `/run/openclaw/auth` as read-only.
 
 ## 9. Testing

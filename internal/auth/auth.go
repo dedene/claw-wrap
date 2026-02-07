@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,11 +54,11 @@ func GenerateSecret() ([]byte, error) {
 	return secret, nil
 }
 
-// WriteSecret writes the secret to the specified path with 0640 permissions.
+// WriteSecret writes the secret to the specified path with 0600 permissions.
 // It uses an atomic write via a temporary file to prevent partial writes.
 func WriteSecret(path string, secret []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
@@ -76,7 +77,7 @@ func WriteSecret(path string, secret []byte) error {
 	}()
 
 	// Set permissions before writing content
-	if err := tmpFile.Chmod(0640); err != nil {
+	if err := tmpFile.Chmod(0600); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
@@ -122,18 +123,29 @@ func LoadSecret(path string) ([]byte, error) {
 	return secret, nil
 }
 
-// ComputeHMAC computes an HMAC-SHA256 signature over the concatenation of:
-// timestamp + tool + json(args) + cwd
-// Returns the signature as a base64-encoded string.
+// ComputeHMAC computes an HMAC-SHA256 signature over:
+// timestamp + tool + json(args) + cwd + json({}).
+// For env-aware signing, use ComputeHMACWithEnv.
 func ComputeHMAC(secret []byte, timestamp, tool, cwd string, args []string) (string, error) {
+	return ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, nil)
+}
+
+// ComputeHMACWithEnv computes an HMAC-SHA256 signature over:
+// timestamp + tool + json(args) + cwd + json(env canonical).
+func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string) (string, error) {
 	// Serialize args as JSON for consistent encoding
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal args: %w", err)
 	}
 
+	envJSON, err := marshalEnvCanonical(env)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal env: %w", err)
+	}
+
 	// Build the message to sign
-	message := timestamp + tool + string(argsJSON) + cwd
+	message := timestamp + tool + string(argsJSON) + cwd + envJSON
 
 	// Compute HMAC-SHA256
 	mac := hmac.New(sha256.New, secret)
@@ -146,14 +158,21 @@ func ComputeHMAC(secret []byte, timestamp, tool, cwd string, args []string) (str
 // VerifyHMAC verifies the provided HMAC signature against a freshly computed one.
 // It uses constant-time comparison to prevent timing attacks and validates
 // that the timestamp is within the allowed freshness window.
+// VerifyHMAC verifies signature using an empty env object.
+// For env-aware verification, use VerifyHMACWithEnv.
 func VerifyHMAC(secret []byte, timestamp, tool, cwd string, args []string, providedHMAC string) error {
+	return VerifyHMACWithEnv(secret, timestamp, tool, cwd, args, nil, providedHMAC)
+}
+
+// VerifyHMACWithEnv verifies the provided HMAC signature with env included.
+func VerifyHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, providedHMAC string) error {
 	// First validate timestamp freshness
 	if err := ValidateTimestamp(timestamp); err != nil {
 		return err
 	}
 
 	// Compute expected HMAC
-	expectedHMAC, err := ComputeHMAC(secret, timestamp, tool, cwd, args)
+	expectedHMAC, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, env)
 	if err != nil {
 		return fmt.Errorf("failed to compute expected HMAC: %w", err)
 	}
@@ -175,6 +194,39 @@ func VerifyHMAC(secret []byte, timestamp, tool, cwd string, args []string, provi
 	}
 
 	return nil
+}
+
+func marshalEnvCanonical(env map[string]string) (string, error) {
+	if len(env) == 0 {
+		return "{}", nil
+	}
+
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		kb, err := json.Marshal(k)
+		if err != nil {
+			return "", err
+		}
+		vb, err := json.Marshal(env[k])
+		if err != nil {
+			return "", err
+		}
+		b.Write(kb)
+		b.WriteByte(':')
+		b.Write(vb)
+	}
+	b.WriteByte('}')
+	return b.String(), nil
 }
 
 // ValidateTimestamp checks that the timestamp (Unix seconds as string)

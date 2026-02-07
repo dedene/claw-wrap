@@ -11,6 +11,15 @@ proxy:
   timeout: 300s
   inline_threshold: 1MB
   hmac_secret_file: /run/openclaw/auth
+  max_connections: 64
+  read_header_timeout: 3s
+  read_message_timeout: 15s
+  max_stdin_message_size: 1MB
+  replay_cache_ttl: 2m
+  replay_cache_max_entries: 10000
+
+security:
+  allow_unverified_caller_exe: false
 
 credentials:
   github-token:
@@ -34,6 +43,15 @@ proxy:
   timeout: 300s                            # Default execution timeout
   inline_threshold: 1MB                    # Switch to temp file above this
   hmac_secret_file: /run/openclaw/auth     # Path to HMAC secret
+  max_connections: 64                      # Max concurrent connections
+  read_header_timeout: 3s                  # Initial request read timeout
+  read_message_timeout: 15s                # Per stdin/control message timeout
+  max_stdin_message_size: 1MB              # Max wrapper->daemon NDJSON message
+  replay_cache_ttl: 2m                     # Replay protection cache TTL
+  replay_cache_max_entries: 10000          # Replay cache size bound
+
+security:
+  allow_unverified_caller_exe: false       # Fail closed if caller executable cannot be resolved
 
 # Credential definitions
 credentials:
@@ -96,6 +114,12 @@ proxy:
   timeout: 300s                            # Default execution timeout (required)
   inline_threshold: 1MB                    # Output size before switching to temp file
   hmac_secret_file: /run/openclaw/auth     # Path where daemon writes HMAC secret
+  max_connections: 64                       # Concurrent connection limit
+  read_header_timeout: 3s                   # Timeout for first request read
+  read_message_timeout: 15s                 # Timeout for stdin/control reads
+  max_stdin_message_size: 1MB               # Max stdin/control message size
+  replay_cache_ttl: 2m                      # Replay detection TTL
+  replay_cache_max_entries: 10000           # Replay cache size cap
 ```
 
 ### `timeout`
@@ -111,6 +135,38 @@ When tool output exceeds this threshold, it's written to a temp file instead of 
 ### `hmac_secret_file`
 
 Path where the daemon writes the HMAC secret on startup. The wrapper reads this file to sign requests. Must be readable by the sandboxed process.
+
+### `max_connections`
+
+Maximum number of concurrent socket connections handled by the daemon. Extra connections are rejected with `server busy`.
+
+### `read_header_timeout`
+
+Timeout for reading the first request payload on a new connection.
+
+### `read_message_timeout`
+
+Timeout applied to each stdin/control message while a proxied command is running.
+
+### `max_stdin_message_size`
+
+Maximum size of wrapper-to-daemon NDJSON messages (`stdin`, `signal`, `cleanup`). Oversized messages are rejected.
+
+### `replay_cache_ttl` / `replay_cache_max_entries`
+
+Controls replay protection for authenticated requests. Reuse of the same signed request within TTL is rejected.
+
+## Security Settings
+
+```yaml
+security:
+  allow_unverified_caller_exe: false
+```
+
+### `allow_unverified_caller_exe`
+
+Default is `false` (recommended): if caller executable resolution fails, request is denied (fail closed).  
+Set to `true` only for exceptional environments where executable lookup is unavailable.
 
 ## Credential Sources
 
@@ -241,6 +297,8 @@ Credential names with dashes can also use underscores:
 
 1. **Blocked args are enforced server-side** - the agent cannot bypass them
 2. **Forced env vars cannot be overridden** - stripped from inherited environment
-3. **Config file is in a temp directory** - cleaned up after tool exits
-4. **Socket requires UID match** - only the configured user can connect
-5. **Binary path is verified** - only claw-wrap can request credentials
+3. **Config file paths are validated** - absolute/traversal paths are rejected
+4. **Config file is in a temp directory** - cleaned up after tool exits
+5. **Socket requires UID match** - only the configured user can connect
+6. **Binary path is verified** - by default executable resolution is fail-closed
+7. **Requests are replay-protected** - duplicate HMACs within TTL are rejected

@@ -293,8 +293,8 @@ func TestWriteSecret_LoadSecret_Roundtrip(t *testing.T) {
 		t.Fatalf("Failed to stat secret file: %v", err)
 	}
 	mode := info.Mode().Perm()
-	if mode != 0640 {
-		t.Errorf("WriteSecret() file mode = %o, want 0640", mode)
+	if mode != 0600 {
+		t.Errorf("WriteSecret() file mode = %o, want 0600", mode)
 	}
 
 	// Load the secret back
@@ -465,5 +465,39 @@ func TestVerifyHMAC_ConstantTimeComparison(t *testing.T) {
 		if err == nil {
 			t.Errorf("VerifyHMAC() accepted invalid signature with byte %d modified", i)
 		}
+	}
+}
+
+func TestComputeHMACWithEnv_CanonicalOrder(t *testing.T) {
+	secret := []byte("test-secret-key-for-hmac-testing")
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	tool := "test-tool"
+	cwd := "/home/user/project"
+	args := []string{"arg1", "arg2"}
+
+	envA := map[string]string{
+		"B_VAR": "2",
+		"A_VAR": "1",
+	}
+	envB := map[string]string{
+		"A_VAR": "1",
+		"B_VAR": "2",
+	}
+
+	hmacA, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, envA)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithEnv() envA error = %v", err)
+	}
+	hmacB, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, envB)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithEnv() envB error = %v", err)
+	}
+
+	if hmacA != hmacB {
+		t.Errorf("canonical env ordering mismatch: %s != %s", hmacA, hmacB)
+	}
+
+	if err := VerifyHMACWithEnv(secret, timestamp, tool, cwd, args, envA, hmacB); err != nil {
+		t.Errorf("VerifyHMACWithEnv() failed with canonical env maps: %v", err)
 	}
 }

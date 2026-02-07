@@ -1,8 +1,12 @@
 // Package protocol defines the socket communication types between claw-wrap and the daemon.
 package protocol
 
+// ProtocolVersion is the wire protocol version for wrapper/daemon requests.
+const ProtocolVersion = 2
+
 // ProxyRequest is sent by wrapper to request tool execution (NDJSON format)
 type ProxyRequest struct {
+	Version   int               `json:"version,omitempty"`
 	Tool      string            `json:"tool"`
 	Args      []string          `json:"args"`
 	Cwd       string            `json:"cwd"`
@@ -13,13 +17,13 @@ type ProxyRequest struct {
 
 // ResponseMessage is sent by daemon during execution (length-prefixed)
 type ResponseMessage struct {
-	Type     string `json:"type"`                 // stdout, stderr, done, error, file
-	Data     string `json:"data,omitempty"`       // base64 for stdout/stderr
-	ExitCode int    `json:"exit_code,omitempty"`  // for done
-	Timeout  bool   `json:"timeout,omitempty"`    // for done with timeout
-	Message  string `json:"message,omitempty"`    // for error
-	Stream   string `json:"stream,omitempty"`     // for file: stdout or stderr
-	Path     string `json:"path,omitempty"`       // for file: temp path
+	Type     string `json:"type"`                // stdout, stderr, done, error, file
+	Data     string `json:"data,omitempty"`      // base64 for stdout/stderr
+	ExitCode int    `json:"exit_code,omitempty"` // for done
+	Timeout  bool   `json:"timeout,omitempty"`   // for done with timeout
+	Message  string `json:"message,omitempty"`   // for error
+	Stream   string `json:"stream,omitempty"`    // for file: stdout or stderr
+	Path     string `json:"path,omitempty"`      // for file: temp path
 }
 
 // WrapperMessage is sent by wrapper during execution (NDJSON format)
@@ -52,6 +56,7 @@ var ValidSignals = map[string]bool{
 
 // AdminRequest is sent for administrative commands.
 type AdminRequest struct {
+	Version   int    `json:"version,omitempty"`
 	Admin     string `json:"admin"`
 	Timestamp string `json:"timestamp"`
 	HMAC      string `json:"hmac"`
@@ -59,7 +64,8 @@ type AdminRequest struct {
 
 // AdminListResponse contains the list of configured tools.
 type AdminListResponse struct {
-	Tools map[string]ToolInfo `json:"tools"`
+	Tools   map[string]ToolInfo `json:"tools"`
+	Version string              `json:"version,omitempty"`
 }
 
 // ToolInfo describes a configured tool.
@@ -71,6 +77,7 @@ type ToolInfo struct {
 // AdminCheckResponse contains credential check results.
 type AdminCheckResponse struct {
 	Credentials map[string]CredentialInfo `json:"credentials"`
+	Version     string                    `json:"version,omitempty"`
 }
 
 // CredentialInfo describes a credential check result.

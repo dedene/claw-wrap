@@ -101,6 +101,15 @@ proxy:
   timeout: 300s
   inline_threshold: 1MB
   hmac_secret_file: /run/openclaw/auth
+  max_connections: 64
+  read_header_timeout: 3s
+  read_message_timeout: 15s
+  max_stdin_message_size: 1MB
+  replay_cache_ttl: 2m
+  replay_cache_max_entries: 10000
+
+security:
+  allow_unverified_caller_exe: false
 
 credentials:
   github-token:
@@ -179,6 +188,12 @@ tools:
 ```
 
 The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited environment and set by the daemon.
+
+### Request integrity and replay protection
+
+- HMAC signature covers `tool`, `args`, `cwd`, and request `env` (protocol v2).
+- Requests are replay-protected with a short-lived daemon cache.
+- Caller executable verification is fail-closed by default (`allow_unverified_caller_exe: false`).
 
 ## Sandbox Setup
 

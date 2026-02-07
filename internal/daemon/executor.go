@@ -12,9 +12,9 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
-	"strings"
 	"time"
 
 	"claw-wrap/internal/config"
@@ -35,13 +35,13 @@ var deniedEnvVars = map[string]bool{
 	"DYLD_FRAMEWORK_PATH":   true,
 	"PYTHONPATH":            true,
 	"PYTHONSTARTUP":         true,
-	"PERL5LIB":             true,
-	"RUBYLIB":              true,
+	"PERL5LIB":              true,
+	"RUBYLIB":               true,
 	"NODE_OPTIONS":          true,
 	"GIT_SSH_COMMAND":       true,
-	"EDITOR":               true,
-	"VISUAL":               true,
-	"PAGER":                true,
+	"EDITOR":                true,
+	"VISUAL":                true,
+	"PAGER":                 true,
 }
 
 // isDeniedEnvVar checks if an environment variable name is in the denylist.
@@ -58,10 +58,10 @@ func isDeniedEnvVar(key string) bool {
 
 // ToolExecutor handles proxy mode execution of a tool.
 type ToolExecutor struct {
-	conn      net.Conn
-	req       *protocol.ProxyRequest
-	tool      *config.ToolDef
-	cfg       *config.Config
+	conn net.Conn
+	req  *protocol.ProxyRequest
+	tool *config.ToolDef
+	cfg  *config.Config
 
 	cmd       *exec.Cmd
 	pgid      int
@@ -71,11 +71,12 @@ type ToolExecutor struct {
 	cancel    context.CancelFunc
 	timeout   time.Duration
 	threshold int64
+	readMsgTO time.Duration
+	msgSize   int
 
 	encoder *framing.Encoder
 	sendMu  sync.Mutex
 
-	tempFiles []string
 	configDir string // temp dir for config file injection
 
 	stdoutBuf *OutputBuffer
@@ -100,8 +101,9 @@ func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.Too
 		cancel:    cancel,
 		timeout:   timeout,
 		threshold: threshold,
+		readMsgTO: cfg.GetReadMessageTimeout(),
+		msgSize:   cfg.GetMaxStdinMessageSize(),
 		encoder:   framing.NewEncoder(conn),
-		tempFiles: make([]string, 0),
 	}
 }
 
@@ -115,16 +117,16 @@ func (e *ToolExecutor) Run() error {
 		return err
 	}
 
+	// Setup config file if needed
+	if err := e.setupConfigFile(); err != nil {
+		e.sendError(fmt.Sprintf("setup config file: %v", err))
+		return err
+	}
+
 	// Build environment
 	env, err := e.buildEnvironment()
 	if err != nil {
 		e.sendError(fmt.Sprintf("build environment: %v", err))
-		return err
-	}
-
-	// Setup config file if needed
-	if err := e.setupConfigFile(); err != nil {
-		e.sendError(fmt.Sprintf("setup config file: %v", err))
 		return err
 	}
 
@@ -419,12 +421,20 @@ func (e *ToolExecutor) stderrPumper(r io.Reader) {
 
 // stdinPumper reads WrapperMessages from the connection and forwards stdin/signals.
 func (e *ToolExecutor) stdinPumper() {
-	reader := framing.NewNDJSONReader(e.conn)
+	reader := framing.NewNDJSONReaderWithLimit(e.conn, e.msgSize)
 
 	for {
+		if e.readMsgTO > 0 {
+			_ = e.conn.SetReadDeadline(time.Now().Add(e.readMsgTO))
+		}
+
 		var msg protocol.WrapperMessage
 		if err := reader.Read(&msg); err != nil {
+			_ = e.conn.SetReadDeadline(time.Time{})
 			if err != io.EOF {
+				if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+					log.Printf("[WARN] stdin/control read timeout after %v", e.readMsgTO)
+				}
 				log.Printf("[DEBUG] stdin read: %v", err)
 			}
 			// Connection closed or error, close stdin
@@ -433,6 +443,7 @@ func (e *ToolExecutor) stdinPumper() {
 			}
 			return
 		}
+		_ = e.conn.SetReadDeadline(time.Time{})
 
 		if err := e.handleWrapperMessage(&msg); err != nil {
 			log.Printf("[WARN] handle wrapper message: %v", err)
@@ -471,12 +482,8 @@ func (e *ToolExecutor) handleWrapperMessage(msg *protocol.WrapperMessage) error 
 		}
 
 	case protocol.MsgTypeCleanup:
-		// Cleanup temp files requested by wrapper
-		for _, path := range msg.Files {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				log.Printf("[WARN] cleanup file %s: %v", path, err)
-			}
-		}
+		// Compatibility no-op. Daemon-only cleanup is enforced server-side.
+		log.Printf("[DEBUG] ignoring client cleanup request (%d files)", len(msg.Files))
 
 	default:
 		log.Printf("[WARN] unknown wrapper message type: %s", msg.Type)
@@ -539,41 +546,61 @@ func (e *ToolExecutor) sendDone(exitCode int, timeout bool) {
 	}
 }
 
-// finalizeOutput closes output buffers and sends file messages if needed.
+// finalizeOutput closes output buffers and streams any file-buffered output.
 func (e *ToolExecutor) finalizeOutput() error {
 	// Finalize stdout buffer
 	if stdoutPath, err := e.stdoutBuf.Finalize(); err != nil {
 		return fmt.Errorf("finalize stdout: %w", err)
 	} else if stdoutPath != "" {
-		// Send file message for stdout
-		msg := protocol.ResponseMessage{
-			Type:   protocol.MsgTypeFile,
-			Stream: "stdout",
-			Path:   stdoutPath,
+		if err := e.streamFile(stdoutPath, protocol.MsgTypeStdout); err != nil {
+			return fmt.Errorf("stream stdout file: %w", err)
 		}
-		if err := e.sendMessage(msg); err != nil {
-			return fmt.Errorf("send stdout file message: %w", err)
+		if err := os.Remove(stdoutPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[WARN] cleanup stdout temp file %s: %v", stdoutPath, err)
 		}
-		e.tempFiles = append(e.tempFiles, stdoutPath)
 	}
 
 	// Finalize stderr buffer
 	if stderrPath, err := e.stderrBuf.Finalize(); err != nil {
 		return fmt.Errorf("finalize stderr: %w", err)
 	} else if stderrPath != "" {
-		// Send file message for stderr
-		msg := protocol.ResponseMessage{
-			Type:   protocol.MsgTypeFile,
-			Stream: "stderr",
-			Path:   stderrPath,
+		if err := e.streamFile(stderrPath, protocol.MsgTypeStderr); err != nil {
+			return fmt.Errorf("stream stderr file: %w", err)
 		}
-		if err := e.sendMessage(msg); err != nil {
-			return fmt.Errorf("send stderr file message: %w", err)
+		if err := os.Remove(stderrPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[WARN] cleanup stderr temp file %s: %v", stderrPath, err)
 		}
-		e.tempFiles = append(e.tempFiles, stderrPath)
 	}
 
 	return nil
+}
+
+func (e *ToolExecutor) streamFile(path string, streamType string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			msg := protocol.ResponseMessage{
+				Type: streamType,
+				Data: base64.StdEncoding.EncodeToString(buf[:n]),
+			}
+			if err := e.sendMessage(msg); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // killProcessGroup sends a signal to the entire process group.
@@ -672,12 +699,6 @@ func (e *ToolExecutor) cleanup() {
 		}
 	}
 
-	// Remove temp files (output files are cleaned up by OutputBuffer.Cleanup)
-	for _, path := range e.tempFiles {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Printf("[WARN] cleanup temp file %s: %v", path, err)
-		}
-	}
 }
 
 // NOTE: renderTemplate is defined in daemon.go and shared by this file

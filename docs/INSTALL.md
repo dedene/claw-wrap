@@ -59,6 +59,15 @@ proxy:
   timeout: 300s
   inline_threshold: 1MB
   hmac_secret_file: /run/openclaw/auth
+  max_connections: 64
+  read_header_timeout: 3s
+  read_message_timeout: 15s
+  max_stdin_message_size: 1MB
+  replay_cache_ttl: 2m
+  replay_cache_max_entries: 10000
+
+security:
+  allow_unverified_caller_exe: false
 
 credentials:
   github-token:
@@ -89,6 +98,7 @@ sudo editor /etc/systemd/system/claw-wrap.service
 ```
 
 > If your GPG home is not the default `~/.gnupg`, also add `Environment=GNUPGHOME=/path/to/.gnupg` to the service file.
+> The provided unit includes strict hardening defaults. If you must relax settings, keep `ReadWritePaths=/run/openclaw`.
 
 ```bash
 sudo systemctl daemon-reload
@@ -142,6 +152,16 @@ Common causes:
 The daemon creates `/run/openclaw/secrets.sock`. If the sandboxed process can't connect:
 - Verify `/run/openclaw` is whitelisted in your firejail profile
 - Check socket permissions: `ls -la /run/openclaw/`
+
+### Protocol version mismatch
+
+If wrapper and daemon versions are out of sync, requests fail with a protocol mismatch error.
+Upgrade and restart together:
+
+```bash
+sudo make install
+sudo systemctl restart claw-wrap
+```
 
 ### Credential fetch fails
 

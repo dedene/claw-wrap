@@ -149,9 +149,22 @@ type NDJSONReader struct {
 
 // NewNDJSONReader creates a new NDJSONReader that reads from r.
 func NewNDJSONReader(r io.Reader) *NDJSONReader {
+	return NewNDJSONReaderWithLimit(r, MaxMessageSize)
+}
+
+// NewNDJSONReaderWithLimit creates a new NDJSONReader with a custom max token size.
+func NewNDJSONReaderWithLimit(r io.Reader, maxTokenSize int) *NDJSONReader {
+	if maxTokenSize <= 0 || maxTokenSize > MaxMessageSize {
+		maxTokenSize = MaxMessageSize
+	}
+
 	scanner := bufio.NewScanner(r)
 	// Set max token size to handle large messages
-	scanner.Buffer(make([]byte, 64*1024), MaxMessageSize)
+	initial := 64 * 1024
+	if maxTokenSize < initial {
+		initial = maxTokenSize
+	}
+	scanner.Buffer(make([]byte, initial), maxTokenSize)
 	return &NDJSONReader{scanner: scanner}
 }
 
@@ -159,6 +172,9 @@ func NewNDJSONReader(r io.Reader) *NDJSONReader {
 func (n *NDJSONReader) Read(v interface{}) error {
 	if !n.scanner.Scan() {
 		if err := n.scanner.Err(); err != nil {
+			if errors.Is(err, bufio.ErrTooLong) {
+				return ErrMessageTooLarge
+			}
 			return fmt.Errorf("scan: %w", err)
 		}
 		return io.EOF

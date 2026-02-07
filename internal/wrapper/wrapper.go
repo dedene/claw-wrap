@@ -72,7 +72,8 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 
 	// 3. Compute timestamp and HMAC
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	hmac, err := auth.ComputeHMAC(secret, timestamp, toolName, cwd, args)
+	var reqEnv map[string]string
+	hmac, err := auth.ComputeHMACWithEnv(secret, timestamp, toolName, cwd, args, reqEnv)
 	if err != nil {
 		return fmt.Errorf("compute hmac: %w", err)
 	}
@@ -86,11 +87,13 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 
 	// 5. Send ProxyRequest (NDJSON)
 	req := &protocol.ProxyRequest{
+		Version:   protocol.ProtocolVersion,
 		Tool:      toolName,
 		Args:      args,
 		Cwd:       cwd,
 		Timestamp: timestamp,
 		HMAC:      hmac,
+		Env:       reqEnv,
 	}
 	ndjson := framing.NewNDJSONWriter(conn)
 	if err := ndjson.Write(req); err != nil {
@@ -110,7 +113,6 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter) error {
 	signalCh := make(chan os.Signal, 1)
 	doneCh := make(chan struct{})
 	var exitCode int
-	var tempFiles []string
 
 	// Start stdin reader goroutine
 	go func() {
@@ -162,14 +164,13 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter) error {
 	for {
 		select {
 		case msg := <-responseCh:
-			done, err := w.handleResponse(msg, &tempFiles)
+			done, err := w.handleResponse(msg)
 			if err != nil {
 				return err
 			}
 			if done {
 				exitCode = msg.ExitCode
 				close(doneCh)
-				w.sendCleanup(ndjson, tempFiles)
 				os.Exit(exitCode)
 			}
 
@@ -211,7 +212,7 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter) error {
 	}
 }
 
-func (w *Wrapper) handleResponse(msg *protocol.ResponseMessage, tempFiles *[]string) (done bool, err error) {
+func (w *Wrapper) handleResponse(msg *protocol.ResponseMessage) (done bool, err error) {
 	switch msg.Type {
 	case protocol.MsgTypeStdout:
 		data, err := base64.StdEncoding.DecodeString(msg.Data)
@@ -228,16 +229,9 @@ func (w *Wrapper) handleResponse(msg *protocol.ResponseMessage, tempFiles *[]str
 		os.Stderr.Write(data)
 
 	case protocol.MsgTypeFile:
-		*tempFiles = append(*tempFiles, msg.Path)
-		data, err := os.ReadFile(msg.Path)
-		if err != nil {
-			return false, fmt.Errorf("read temp file: %w", err)
-		}
-		if msg.Stream == "stdout" {
-			os.Stdout.Write(data)
-		} else {
-			os.Stderr.Write(data)
-		}
+		// Backward-compatible safety: ignore file-path based responses.
+		// Modern daemon versions stream output directly and never expose paths.
+		return false, fmt.Errorf("daemon returned deprecated file response")
 
 	case protocol.MsgTypeDone:
 		return true, nil
@@ -246,17 +240,6 @@ func (w *Wrapper) handleResponse(msg *protocol.ResponseMessage, tempFiles *[]str
 		return true, fmt.Errorf("daemon error: %s", msg.Message)
 	}
 	return false, nil
-}
-
-func (w *Wrapper) sendCleanup(ndjson *framing.NDJSONWriter, files []string) {
-	if len(files) == 0 {
-		return
-	}
-	msg := &protocol.WrapperMessage{
-		Type:  protocol.MsgTypeCleanup,
-		Files: files,
-	}
-	ndjson.Write(msg)
 }
 
 // List requests the list of configured tools.
@@ -311,6 +294,7 @@ func (w *Wrapper) buildAdminRequest(command string) (*protocol.AdminRequest, err
 	}
 
 	return &protocol.AdminRequest{
+		Version:   protocol.ProtocolVersion,
 		Admin:     command,
 		Timestamp: timestamp,
 		HMAC:      hmac,
@@ -339,5 +323,13 @@ func (w *Wrapper) sendAdminRequest(request interface{}) ([]byte, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	return buf[:n], nil
+	data = buf[:n]
+	var adminErr map[string]string
+	if err := json.Unmarshal(data, &adminErr); err == nil {
+		if msg, ok := adminErr["error"]; ok && msg != "" {
+			return nil, fmt.Errorf("daemon error: %s", msg)
+		}
+	}
+
+	return data, nil
 }

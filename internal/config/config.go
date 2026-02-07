@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +21,18 @@ const (
 	DefaultInlineThreshold int64 = 1 << 20
 	// DefaultHMACSecretFile is the default HMAC secret file path.
 	DefaultHMACSecretFile = "/run/openclaw/auth"
+	// DefaultMaxConnections is the default max concurrent daemon connections.
+	DefaultMaxConnections = 64
+	// DefaultReadHeaderTimeout is the timeout for reading the first request frame.
+	DefaultReadHeaderTimeout = 3 * time.Second
+	// DefaultReadMessageTimeout is the timeout for per-message stdin/control reads.
+	DefaultReadMessageTimeout = 15 * time.Second
+	// DefaultMaxStdinMessageSize is the default max size for wrapper->daemon NDJSON messages.
+	DefaultMaxStdinMessageSize = 1 << 20 // 1MB
+	// DefaultReplayCacheTTL is the default TTL for replay entries.
+	DefaultReplayCacheTTL = 2 * time.Minute
+	// DefaultReplayCacheMaxEntries is the default replay cache size cap.
+	DefaultReplayCacheMaxEntries = 10000
 )
 
 // DefaultConfigPath is the default location for wrappers.yaml.
@@ -27,15 +40,27 @@ const DefaultConfigPath = "/etc/openclaw/wrappers.yaml"
 
 // ProxyConfig holds proxy-related configuration.
 type ProxyConfig struct {
-	Timeout         string `yaml:"timeout"`           // e.g., "300s"
-	InlineThreshold string `yaml:"inline_threshold"`  // e.g., "1MB"
-	HMACSecretFile  string `yaml:"hmac_secret_file"`  // e.g., "/run/openclaw/auth"
-	PassBinary      string `yaml:"pass_binary"`       // e.g., "/usr/bin/pass"
+	Timeout             string `yaml:"timeout"`                // e.g., "300s"
+	InlineThreshold     string `yaml:"inline_threshold"`       // e.g., "1MB"
+	HMACSecretFile      string `yaml:"hmac_secret_file"`       // e.g., "/run/openclaw/auth"
+	PassBinary          string `yaml:"pass_binary"`            // e.g., "/usr/bin/pass"
+	MaxConnections      int    `yaml:"max_connections"`        // e.g., 64
+	ReadHeaderTimeout   string `yaml:"read_header_timeout"`    // e.g., "3s"
+	ReadMessageTimeout  string `yaml:"read_message_timeout"`   // e.g., "15s"
+	MaxStdinMessageSize string `yaml:"max_stdin_message_size"` // e.g., "1MB"
+	ReplayCacheTTL      string `yaml:"replay_cache_ttl"`       // e.g., "2m"
+	ReplayCacheMax      int    `yaml:"replay_cache_max_entries"`
+}
+
+// SecurityConfig holds security policy flags.
+type SecurityConfig struct {
+	AllowUnverifiedCallerExe bool `yaml:"allow_unverified_caller_exe"`
 }
 
 // Config is the root configuration structure.
 type Config struct {
 	Proxy       *ProxyConfig             `yaml:"proxy,omitempty"`
+	Security    *SecurityConfig          `yaml:"security,omitempty"`
 	Credentials map[string]CredentialDef `yaml:"credentials"`
 	Tools       map[string]ToolDef       `yaml:"tools"`
 }
@@ -70,6 +95,8 @@ type ConfigFileDef struct {
 	Credentials []string `yaml:"credentials"`
 }
 
+var envVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // Load reads and parses the configuration from the given path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -91,10 +118,26 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the configuration for errors and compiles regex patterns.
 func (c *Config) Validate() error {
+	if c.Credentials == nil {
+		c.Credentials = map[string]CredentialDef{}
+	}
+	if c.Tools == nil {
+		c.Tools = map[string]ToolDef{}
+	}
+
+	for name, cred := range c.Credentials {
+		if strings.TrimSpace(cred.Source) == "" {
+			return fmt.Errorf("credential %q: empty source", name)
+		}
+	}
+
 	for toolName, tool := range c.Tools {
-		// Binary must be non-empty.
+		// Binary must be non-empty and absolute.
 		if tool.Binary == "" {
 			return fmt.Errorf("tool %q: empty binary path", toolName)
+		}
+		if !filepath.IsAbs(tool.Binary) {
+			return fmt.Errorf("tool %q: binary path must be absolute: %q", toolName, tool.Binary)
 		}
 
 		// Warn (don't error) if binary doesn't exist on disk.
@@ -102,15 +145,26 @@ func (c *Config) Validate() error {
 			log.Printf("[WARN] tool %q: binary %q not found on disk: %v", toolName, tool.Binary, err)
 		}
 
-		// Env credential references must exist in config.Credentials.
-		for _, credName := range tool.Env {
+		for envVar, credName := range tool.Env {
+			if !envVarNameRegex.MatchString(envVar) {
+				return fmt.Errorf("tool %q: invalid env var name %q", toolName, envVar)
+			}
 			if _, ok := c.Credentials[credName]; !ok {
 				return fmt.Errorf("tool %q: references undefined credential %q", toolName, credName)
 			}
 		}
 
-		// ConfigFile credential references must exist in config.Credentials.
+		for envVar := range tool.ForcedEnv {
+			if !envVarNameRegex.MatchString(envVar) {
+				return fmt.Errorf("tool %q: invalid forced_env var name %q", toolName, envVar)
+			}
+		}
+
 		if tool.ConfigFile != nil {
+			if err := validateConfigFileDef(tool.ConfigFile); err != nil {
+				return fmt.Errorf("tool %q: invalid config_file: %w", toolName, err)
+			}
+
 			for _, credName := range tool.ConfigFile.Credentials {
 				if _, ok := c.Credentials[credName]; !ok {
 					return fmt.Errorf("tool %q: config_file references undefined credential %q", toolName, credName)
@@ -127,6 +181,57 @@ func (c *Config) Validate() error {
 			c.Tools[toolName].BlockedArgs[i].Compiled = re
 		}
 	}
+	return nil
+}
+
+func validateConfigFileDef(def *ConfigFileDef) error {
+	if def == nil {
+		return nil
+	}
+	if err := validateSafeRelativePath(def.XDGSubdir, true); err != nil {
+		return fmt.Errorf("xdg_subdir: %w", err)
+	}
+	if err := validateSafeRelativePath(def.Filename, false); err != nil {
+		return fmt.Errorf("filename: %w", err)
+	}
+	if strings.TrimSpace(def.Template) == "" {
+		return fmt.Errorf("template must not be empty")
+	}
+	return nil
+}
+
+func validateSafeRelativePath(value string, allowNested bool) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return fmt.Errorf("contains NUL byte")
+	}
+	if filepath.IsAbs(value) {
+		return fmt.Errorf("must be relative")
+	}
+	if strings.Contains(value, "\\") {
+		return fmt.Errorf("must use forward slashes")
+	}
+	if strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") {
+		return fmt.Errorf("must not start or end with slash")
+	}
+
+	parts := strings.Split(value, "/")
+	if !allowNested && len(parts) > 1 {
+		return fmt.Errorf("must not contain path separators")
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("contains invalid path segment %q", part)
+		}
+	}
+
+	clean := filepath.Clean(value)
+	if clean != value {
+		return fmt.Errorf("must be normalized")
+	}
+
 	return nil
 }
 
@@ -221,6 +326,78 @@ func (c *Config) GetPassBinary() string {
 		return c.Proxy.PassBinary
 	}
 	return "/usr/bin/pass"
+}
+
+// AllowUnverifiedCallerExe returns whether executable verification can fail open.
+func (c *Config) AllowUnverifiedCallerExe() bool {
+	return c.Security != nil && c.Security.AllowUnverifiedCallerExe
+}
+
+// GetMaxConnections returns the max concurrent daemon connections.
+func (c *Config) GetMaxConnections() int {
+	if c.Proxy == nil || c.Proxy.MaxConnections <= 0 {
+		return DefaultMaxConnections
+	}
+	return c.Proxy.MaxConnections
+}
+
+// GetReadHeaderTimeout returns header read timeout.
+func (c *Config) GetReadHeaderTimeout() time.Duration {
+	if c.Proxy == nil || c.Proxy.ReadHeaderTimeout == "" {
+		return DefaultReadHeaderTimeout
+	}
+	d, err := ParseDuration(c.Proxy.ReadHeaderTimeout)
+	if err != nil || d <= 0 {
+		return DefaultReadHeaderTimeout
+	}
+	return d
+}
+
+// GetReadMessageTimeout returns per-message read timeout.
+func (c *Config) GetReadMessageTimeout() time.Duration {
+	if c.Proxy == nil || c.Proxy.ReadMessageTimeout == "" {
+		return DefaultReadMessageTimeout
+	}
+	d, err := ParseDuration(c.Proxy.ReadMessageTimeout)
+	if err != nil || d <= 0 {
+		return DefaultReadMessageTimeout
+	}
+	return d
+}
+
+// GetMaxStdinMessageSize returns max wrapper->daemon NDJSON message size.
+func (c *Config) GetMaxStdinMessageSize() int {
+	if c.Proxy == nil || c.Proxy.MaxStdinMessageSize == "" {
+		return DefaultMaxStdinMessageSize
+	}
+	size, err := ParseByteSize(c.Proxy.MaxStdinMessageSize)
+	if err != nil || size <= 0 {
+		return DefaultMaxStdinMessageSize
+	}
+	if size > int64(^uint(0)>>1) {
+		return DefaultMaxStdinMessageSize
+	}
+	return int(size)
+}
+
+// GetReplayCacheTTL returns replay cache TTL.
+func (c *Config) GetReplayCacheTTL() time.Duration {
+	if c.Proxy == nil || c.Proxy.ReplayCacheTTL == "" {
+		return DefaultReplayCacheTTL
+	}
+	d, err := ParseDuration(c.Proxy.ReplayCacheTTL)
+	if err != nil || d <= 0 {
+		return DefaultReplayCacheTTL
+	}
+	return d
+}
+
+// GetReplayCacheMaxEntries returns replay cache max size.
+func (c *Config) GetReplayCacheMaxEntries() int {
+	if c.Proxy == nil || c.Proxy.ReplayCacheMax <= 0 {
+		return DefaultReplayCacheMaxEntries
+	}
+	return c.Proxy.ReplayCacheMax
 }
 
 // GetTimeout returns the tool-specific timeout or falls back to the global default.

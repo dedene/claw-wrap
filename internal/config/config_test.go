@@ -351,6 +351,9 @@ func TestValidate_MissingConfigFileCredential(t *testing.T) {
 			"gh": {
 				Binary: "/usr/bin/gh",
 				ConfigFile: &ConfigFileDef{
+					XDGSubdir:   "gh",
+					Filename:    "config.yml",
+					Template:    "token: {{ .nonexistent }}",
 					Credentials: []string{"nonexistent"},
 				},
 			},
@@ -374,6 +377,9 @@ func TestValidate_ValidConfigFileCredential(t *testing.T) {
 			"gh": {
 				Binary: "/usr/bin/gh",
 				ConfigFile: &ConfigFileDef{
+					XDGSubdir:   "gh",
+					Filename:    "config.yml",
+					Template:    "token: {{ .github-token }}",
 					Credentials: []string{"github-token"},
 				},
 			},
@@ -405,6 +411,9 @@ func TestValidate_FullValidConfig(t *testing.T) {
 					{Pattern: `repo\s+delete`, Message: "blocked"},
 				},
 				ConfigFile: &ConfigFileDef{
+					XDGSubdir:   "gh",
+					Filename:    "config.yml",
+					Template:    "token: {{ .github-token }}",
 					Credentials: []string{"github-token"},
 				},
 			},
@@ -417,5 +426,55 @@ func TestValidate_FullValidConfig(t *testing.T) {
 	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("Validate() unexpected error for full valid config: %v", err)
+	}
+}
+
+func TestValidate_ConfigFilePathTraversalRejected(t *testing.T) {
+	cfg := &Config{
+		Credentials: map[string]CredentialDef{
+			"token": {Source: "pass:cli/token"},
+		},
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				ConfigFile: &ConfigFileDef{
+					XDGSubdir:   "../escape",
+					Filename:    "config.yml",
+					Template:    "token: {{ .token }}",
+					Credentials: []string{"token"},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject xdg_subdir traversal")
+	}
+	if !strings.Contains(err.Error(), "xdg_subdir") {
+		t.Errorf("error = %v, want xdg_subdir validation failure", err)
+	}
+}
+
+func TestGetProxySecurityDefaults(t *testing.T) {
+	cfg := &Config{}
+
+	if got := cfg.GetMaxConnections(); got != DefaultMaxConnections {
+		t.Errorf("GetMaxConnections() = %d, want %d", got, DefaultMaxConnections)
+	}
+	if got := cfg.GetReadHeaderTimeout(); got != DefaultReadHeaderTimeout {
+		t.Errorf("GetReadHeaderTimeout() = %v, want %v", got, DefaultReadHeaderTimeout)
+	}
+	if got := cfg.GetReadMessageTimeout(); got != DefaultReadMessageTimeout {
+		t.Errorf("GetReadMessageTimeout() = %v, want %v", got, DefaultReadMessageTimeout)
+	}
+	if got := cfg.GetMaxStdinMessageSize(); got != DefaultMaxStdinMessageSize {
+		t.Errorf("GetMaxStdinMessageSize() = %d, want %d", got, DefaultMaxStdinMessageSize)
+	}
+	if got := cfg.GetReplayCacheTTL(); got != DefaultReplayCacheTTL {
+		t.Errorf("GetReplayCacheTTL() = %v, want %v", got, DefaultReplayCacheTTL)
+	}
+	if got := cfg.GetReplayCacheMaxEntries(); got != DefaultReplayCacheMaxEntries {
+		t.Errorf("GetReplayCacheMaxEntries() = %d, want %d", got, DefaultReplayCacheMaxEntries)
 	}
 }

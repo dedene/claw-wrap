@@ -13,7 +13,7 @@ RestartSec=5
 
 # Create runtime directory for socket (preserve contents across restarts)
 RuntimeDirectory=openclaw
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 
 # $HOME is set automatically by systemd when User= is configured.
@@ -26,6 +26,18 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/run/openclaw
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

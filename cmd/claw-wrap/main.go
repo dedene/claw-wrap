@@ -108,6 +108,7 @@ Options:
 		}
 	}
 
+	opts = append(opts, daemon.WithVersion(version))
 	d := daemon.New(opts...)
 	return d.Run()
 }
@@ -118,6 +119,8 @@ func runList() error {
 	if err != nil {
 		return err
 	}
+
+	warnVersionMismatch(resp.Version)
 
 	fmt.Println("Configured tools:")
 	fmt.Println()
@@ -134,6 +137,8 @@ func runCheck() error {
 	if err != nil {
 		return err
 	}
+
+	warnVersionMismatch(resp.Version)
 
 	fmt.Println("Checking credentials...")
 	fmt.Println()
@@ -223,6 +228,12 @@ func runInstall() error {
 	}
 	fmt.Printf("Done. %d symlinks installed.\n", installed)
 	return nil
+}
+
+func warnVersionMismatch(daemonVersion string) {
+	if daemonVersion != "" && daemonVersion != version {
+		fmt.Fprintf(os.Stderr, "Warning: daemon is %s, client is %s — restart daemon:\n  sudo systemctl restart claw-wrap\n\n", daemonVersion, version)
+	}
 }
 
 // selfExePath returns the resolved absolute path of the running binary.
