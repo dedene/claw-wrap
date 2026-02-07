@@ -213,7 +213,7 @@ The path unit starts automatically with the gateway (via `WantedBy=openclaw-gate
 
 #### Encrypted Credentials
 
-The gateway needs its own secrets (auth token, bot token) that aren't CLI tool credentials handled by claw-wrap. These shouldn't sit in plaintext config files. systemd's `LoadCredentialEncrypted` keeps them encrypted at rest and only decrypted in memory at service start.
+The gateway needs its own secrets (auth token, bot token) that aren't CLI tool credentials handled by claw-wrap. These shouldn't sit in plaintext config files. systemd's [`LoadCredentialEncrypted`](https://systemd.io/CREDENTIALS/) keeps them encrypted at rest and only decrypted in memory at service start.
 
 **Encrypt a secret:**
 
