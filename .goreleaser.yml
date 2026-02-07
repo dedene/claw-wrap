@@ -31,16 +31,11 @@ changelog:
       - '^docs:'
       - '^style:'
 
-brews:
+homebrew_casks:
   - repository:
       owner: dedene
       name: homebrew-tap
       token: '{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}'
-    directory: Formula
+    directory: Casks
     homepage: https://github.com/dedene/claw-wrap
     description: Credential proxy for CLI tools — secrets never enter the sandbox
-    license: MIT
-    install: |
-      bin.install "claw-wrap"
-    test: |
-      system "#{bin}/claw-wrap", "version"
