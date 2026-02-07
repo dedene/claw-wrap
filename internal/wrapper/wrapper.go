@@ -261,7 +261,11 @@ func (w *Wrapper) sendCleanup(ndjson *framing.NDJSONWriter, files []string) {
 
 // List requests the list of configured tools.
 func (w *Wrapper) List() (*protocol.AdminListResponse, error) {
-	data, err := w.sendAdminRequest(protocol.AdminRequest{Admin: "list"})
+	req, err := w.buildAdminRequest("list")
+	if err != nil {
+		return nil, err
+	}
+	data, err := w.sendAdminRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +280,11 @@ func (w *Wrapper) List() (*protocol.AdminListResponse, error) {
 
 // Check requests credential verification.
 func (w *Wrapper) Check() (*protocol.AdminCheckResponse, error) {
-	data, err := w.sendAdminRequest(protocol.AdminRequest{Admin: "check"})
+	req, err := w.buildAdminRequest("check")
+	if err != nil {
+		return nil, err
+	}
+	data, err := w.sendAdminRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -289,8 +297,27 @@ func (w *Wrapper) Check() (*protocol.AdminCheckResponse, error) {
 	return &resp, nil
 }
 
+// buildAdminRequest creates a signed admin request.
+func (w *Wrapper) buildAdminRequest(command string) (*protocol.AdminRequest, error) {
+	secret, err := auth.LoadSecret(w.authPath)
+	if err != nil {
+		return nil, fmt.Errorf("load secret: %w", err)
+	}
+
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	hmac, err := auth.ComputeHMAC(secret, timestamp, "admin:"+command, "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("compute hmac: %w", err)
+	}
+
+	return &protocol.AdminRequest{
+		Admin:     command,
+		Timestamp: timestamp,
+		HMAC:      hmac,
+	}, nil
+}
+
 // sendAdminRequest sends an admin request to the daemon and returns the response.
-// Admin requests use simple JSON request/response pattern (no HMAC required).
 func (w *Wrapper) sendAdminRequest(request interface{}) ([]byte, error) {
 	conn, err := net.Dial("unix", w.socketPath)
 	if err != nil {

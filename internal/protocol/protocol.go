@@ -52,7 +52,9 @@ var ValidSignals = map[string]bool{
 
 // AdminRequest is sent for administrative commands.
 type AdminRequest struct {
-	Admin string `json:"admin"`
+	Admin     string `json:"admin"`
+	Timestamp string `json:"timestamp"`
+	HMAC      string `json:"hmac"`
 }
 
 // AdminListResponse contains the list of configured tools.

@@ -86,6 +86,13 @@ func (b *OutputBuffer) switchToFileMode() error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 
+	// Restrict permissions regardless of umask
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+
 	b.tempFile = f
 	b.tempPath = f.Name()
 	b.inlineMode = false

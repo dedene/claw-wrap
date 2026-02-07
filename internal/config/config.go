@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -29,6 +30,7 @@ type ProxyConfig struct {
 	Timeout         string `yaml:"timeout"`           // e.g., "300s"
 	InlineThreshold string `yaml:"inline_threshold"`  // e.g., "1MB"
 	HMACSecretFile  string `yaml:"hmac_secret_file"`  // e.g., "/run/openclaw/auth"
+	PassBinary      string `yaml:"pass_binary"`       // e.g., "/usr/bin/pass"
 }
 
 // Config is the root configuration structure.
@@ -55,8 +57,9 @@ type ToolDef struct {
 
 // BlockedArg defines a blocked argument pattern.
 type BlockedArg struct {
-	Pattern string `yaml:"pattern"`
-	Message string `yaml:"message"`
+	Pattern  string         `yaml:"pattern"`
+	Message  string         `yaml:"message"`
+	Compiled *regexp.Regexp `yaml:"-"` // compiled at validation time
 }
 
 // ConfigFileDef defines a temporary config file to generate.
@@ -79,7 +82,52 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
 	return &config, nil
+}
+
+// Validate checks the configuration for errors and compiles regex patterns.
+func (c *Config) Validate() error {
+	for toolName, tool := range c.Tools {
+		// Binary must be non-empty.
+		if tool.Binary == "" {
+			return fmt.Errorf("tool %q: empty binary path", toolName)
+		}
+
+		// Warn (don't error) if binary doesn't exist on disk.
+		if _, err := os.Stat(tool.Binary); err != nil {
+			log.Printf("[WARN] tool %q: binary %q not found on disk: %v", toolName, tool.Binary, err)
+		}
+
+		// Env credential references must exist in config.Credentials.
+		for _, credName := range tool.Env {
+			if _, ok := c.Credentials[credName]; !ok {
+				return fmt.Errorf("tool %q: references undefined credential %q", toolName, credName)
+			}
+		}
+
+		// ConfigFile credential references must exist in config.Credentials.
+		if tool.ConfigFile != nil {
+			for _, credName := range tool.ConfigFile.Credentials {
+				if _, ok := c.Credentials[credName]; !ok {
+					return fmt.Errorf("tool %q: config_file references undefined credential %q", toolName, credName)
+				}
+			}
+		}
+
+		// Compile blocked_args regex patterns.
+		for i, b := range tool.BlockedArgs {
+			re, err := regexp.Compile(b.Pattern)
+			if err != nil {
+				return fmt.Errorf("tool %q: invalid blocked_args pattern %q: %w", toolName, b.Pattern, err)
+			}
+			c.Tools[toolName].BlockedArgs[i].Compiled = re
+		}
+	}
+	return nil
 }
 
 // LoadDefault loads the configuration from the default path.
@@ -165,6 +213,14 @@ func (c *Config) GetHMACSecretFile() string {
 		return DefaultHMACSecretFile
 	}
 	return c.Proxy.HMACSecretFile
+}
+
+// GetPassBinary returns the configured pass binary path or the default.
+func (c *Config) GetPassBinary() string {
+	if c.Proxy != nil && c.Proxy.PassBinary != "" {
+		return c.Proxy.PassBinary
+	}
+	return "/usr/bin/pass"
 }
 
 // GetTimeout returns the tool-specific timeout or falls back to the global default.

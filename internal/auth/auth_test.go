@@ -389,6 +389,56 @@ func TestComputeHMAC_EmptyArgs(t *testing.T) {
 	}
 }
 
+func TestComputeHMAC_AdminCommand(t *testing.T) {
+	secret := []byte("test-secret-key-for-hmac-testing")
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// Admin commands use tool="admin:<command>", args=nil, cwd=""
+	hmac, err := ComputeHMAC(secret, timestamp, "admin:list", "", nil)
+	if err != nil {
+		t.Fatalf("ComputeHMAC() error = %v", err)
+	}
+
+	// Verify round-trip
+	err = VerifyHMAC(secret, timestamp, "admin:list", "", nil, hmac)
+	if err != nil {
+		t.Errorf("VerifyHMAC() rejected valid admin HMAC: %v", err)
+	}
+
+	// Also test "check" command
+	hmacCheck, err := ComputeHMAC(secret, timestamp, "admin:check", "", nil)
+	if err != nil {
+		t.Fatalf("ComputeHMAC() error = %v", err)
+	}
+	err = VerifyHMAC(secret, timestamp, "admin:check", "", nil, hmacCheck)
+	if err != nil {
+		t.Errorf("VerifyHMAC() rejected valid admin:check HMAC: %v", err)
+	}
+}
+
+func TestVerifyHMAC_AdminCommand_WrongSignature(t *testing.T) {
+	secret := []byte("test-secret-key-for-hmac-testing")
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// Compute HMAC for "list"
+	hmacList, err := ComputeHMAC(secret, timestamp, "admin:list", "", nil)
+	if err != nil {
+		t.Fatalf("ComputeHMAC() error = %v", err)
+	}
+
+	// Verify with "check" should fail (different tool string)
+	err = VerifyHMAC(secret, timestamp, "admin:check", "", nil, hmacList)
+	if err == nil {
+		t.Error("VerifyHMAC() should reject admin:list HMAC when verifying admin:check")
+	}
+
+	// Verify with regular tool should fail
+	err = VerifyHMAC(secret, timestamp, "gh", "", nil, hmacList)
+	if err == nil {
+		t.Error("VerifyHMAC() should reject admin HMAC when verifying regular tool")
+	}
+}
+
 func TestVerifyHMAC_ConstantTimeComparison(t *testing.T) {
 	// This test verifies the implementation uses constant-time comparison
 	// by checking the function signature rather than timing (timing tests are flaky)

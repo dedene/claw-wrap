@@ -9,8 +9,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -32,6 +32,9 @@ type Daemon struct {
 	allowedBinaries []string
 	listener        net.Listener
 	secret          []byte
+
+	cfg   *config.Config
+	cfgMu sync.RWMutex
 }
 
 // Option configures the daemon.
@@ -105,27 +108,39 @@ func (d *Daemon) Run() error {
 		return fmt.Errorf("remove stale socket: %w", err)
 	}
 
-	// Create listener
+	// Create listener with world-writable permissions via umask (no chmod race)
+	oldUmask := syscall.Umask(0o111)
 	listener, err := net.Listen("unix", d.socketPath)
+	syscall.Umask(oldUmask)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 	d.listener = listener
 
-	// Make socket world-writable so sandbox can connect
-	if err := os.Chmod(d.socketPath, 0666); err != nil {
-		return fmt.Errorf("chmod socket: %w", err)
-	}
+	// Cache initial config
+	d.cfgMu.Lock()
+	d.cfg = cfg
+	d.cfgMu.Unlock()
 
 	log.Printf("Secrets daemon listening on %s", d.socketPath)
 
-	// Handle shutdown gracefully
+	// Handle signals: SIGINT/SIGTERM for shutdown, SIGHUP for config reload
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		<-sigCh
-		log.Println("[INFO] Shutting down...")
-		listener.Close()
+		for sig := range sigCh {
+			if sig == syscall.SIGHUP {
+				if err := d.reloadConfig(); err != nil {
+					log.Printf("[ERROR] Config reload failed: %v (keeping previous config)", err)
+				} else {
+					log.Printf("[INFO] Config reloaded successfully")
+				}
+				continue
+			}
+			log.Println("[INFO] Shutting down...")
+			listener.Close()
+			return
+		}
 	}()
 
 	// Accept connections
@@ -139,16 +154,29 @@ func (d *Daemon) Run() error {
 			continue
 		}
 
-		// Reload config on each request to pick up changes
-		cfg, err = config.Load(d.configPath)
-		if err != nil {
-			log.Printf("[ERROR] Reload config: %v", err)
-			conn.Close()
-			continue
-		}
-
-		go d.handleConnection(conn, cfg)
+		go d.handleConnection(conn, d.getConfig())
 	}
+}
+
+// reloadConfig loads and validates a new config, replacing the cached one.
+// On error, the previous config is preserved.
+func (d *Daemon) reloadConfig() error {
+	newCfg, err := config.Load(d.configPath)
+	if err != nil {
+		return err
+	}
+
+	d.cfgMu.Lock()
+	d.cfg = newCfg
+	d.cfgMu.Unlock()
+	return nil
+}
+
+// getConfig returns the current cached config.
+func (d *Daemon) getConfig() *config.Config {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.cfg
 }
 
 // handleConnection processes a single client connection.
@@ -205,12 +233,12 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		return
 	}
 
-	// Route based on request type
+	// Route based on request type (check admin first since admin requests now include hmac)
 	switch {
-	case rawRequest["hmac"] != nil:
-		d.handleProxyRequest(conn, buf[:n], cfg, callerInfo)
 	case rawRequest["admin"] != nil:
 		d.handleAdminRequest(conn, buf[:n], cfg)
+	case rawRequest["hmac"] != nil:
+		d.handleProxyRequest(conn, buf[:n], cfg, callerInfo)
 	default:
 		d.sendError(conn, "invalid request: use proxy protocol")
 	}
@@ -221,6 +249,13 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	var req protocol.AdminRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		d.sendError(conn, err.Error())
+		return
+	}
+
+	// Verify HMAC (admin requests use tool="admin:<command>", no args, no cwd)
+	if err := auth.VerifyHMAC(d.secret, req.Timestamp, "admin:"+req.Admin, "", nil, req.HMAC); err != nil {
+		log.Printf("[WARN] Admin auth failed for %s: %v", req.Admin, err)
+		d.sendError(conn, "authentication failed")
 		return
 	}
 
@@ -239,7 +274,7 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	case "check":
 		resp := protocol.AdminCheckResponse{Credentials: make(map[string]protocol.CredentialInfo)}
 		for name, credDef := range cfg.Credentials {
-			value, err := credentials.Fetch(credDef.Source)
+			value, err := credentials.Fetch(credDef.Source, credentials.WithPassBinary(cfg.GetPassBinary()))
 			if err != nil || value == "" {
 				resp.Credentials[name] = protocol.CredentialInfo{Status: "failed"}
 			} else {
@@ -313,12 +348,11 @@ func checkBlockedArgs(args []string, blocked []config.BlockedArg) (bool, string)
 
 	cmdLine := strings.Join(args, " ")
 	for _, b := range blocked {
-		re, err := regexp.Compile(b.Pattern)
-		if err != nil {
-			log.Printf("[WARN] Invalid blocked_args pattern %q: %v", b.Pattern, err)
-			continue
+		if b.Compiled == nil {
+			log.Printf("[ERROR] Nil compiled pattern for %q - fail-closed", b.Pattern)
+			return false, "internal error: invalid security pattern"
 		}
-		if re.MatchString(cmdLine) {
+		if b.Compiled.MatchString(cmdLine) {
 			msg := b.Message
 			if msg == "" {
 				msg = "operation blocked by security policy"

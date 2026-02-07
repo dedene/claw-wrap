@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"strings"
 	"time"
 
 	"claw-wrap/internal/config"
@@ -21,6 +22,39 @@ import (
 	"claw-wrap/internal/framing"
 	"claw-wrap/internal/protocol"
 )
+
+// deniedEnvVars contains environment variable names that must never be
+// injected via request env. These could be used to hijack tool execution.
+var deniedEnvVars = map[string]bool{
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
+	"BASH_ENV":              true,
+	"ENV":                   true,
+	"DYLD_INSERT_LIBRARIES": true,
+	"DYLD_LIBRARY_PATH":     true,
+	"DYLD_FRAMEWORK_PATH":   true,
+	"PYTHONPATH":            true,
+	"PYTHONSTARTUP":         true,
+	"PERL5LIB":             true,
+	"RUBYLIB":              true,
+	"NODE_OPTIONS":          true,
+	"GIT_SSH_COMMAND":       true,
+	"EDITOR":               true,
+	"VISUAL":               true,
+	"PAGER":                true,
+}
+
+// isDeniedEnvVar checks if an environment variable name is in the denylist.
+// Also blocks BASH_FUNC_* prefix (bash function exports).
+func isDeniedEnvVar(key string) bool {
+	if deniedEnvVars[key] {
+		return true
+	}
+	if strings.HasPrefix(key, "BASH_FUNC_") {
+		return true
+	}
+	return false
+}
 
 // ToolExecutor handles proxy mode execution of a tool.
 type ToolExecutor struct {
@@ -144,7 +178,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("missing credential config: %s", credName)
 		}
-		value, err := credentials.Fetch(credDef.Source)
+		value, err := credentials.Fetch(credDef.Source, credentials.WithPassBinary(e.cfg.GetPassBinary()))
 		if err != nil {
 			return nil, fmt.Errorf("fetch credential %s: %w", credName, err)
 		}
@@ -161,8 +195,12 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		forcedKeys[k] = true
 	}
 
-	// Add request env (cannot override forced_env)
+	// Add request env (cannot override forced_env, blocked dangerous vars)
 	for k, v := range e.req.Env {
+		if isDeniedEnvVar(k) {
+			log.Printf("[WARN] Request attempted to set denied env var %q, ignoring", k)
+			continue
+		}
 		if forcedKeys[k] {
 			log.Printf("[WARN] Request attempted to override forced_env key %q, ignoring", k)
 			continue
@@ -210,7 +248,7 @@ func (e *ToolExecutor) setupConfigFile() error {
 		if !ok {
 			return fmt.Errorf("missing credential config: %s", credName)
 		}
-		value, err := credentials.Fetch(credDef.Source)
+		value, err := credentials.Fetch(credDef.Source, credentials.WithPassBinary(e.cfg.GetPassBinary()))
 		if err != nil {
 			return fmt.Errorf("fetch credential %s: %w", credName, err)
 		}

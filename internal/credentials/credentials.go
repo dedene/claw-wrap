@@ -14,22 +14,44 @@ import (
 // DefaultEnvFile is the path to the env file with service credentials.
 const DefaultEnvFile = "/run/openclaw/env"
 
+// FetchOptions holds configuration for credential fetching.
+type FetchOptions struct {
+	PassBinary string
+}
+
+// FetchOption configures credential fetching.
+type FetchOption func(*FetchOptions)
+
+// WithPassBinary sets the path to the pass binary.
+func WithPassBinary(path string) FetchOption {
+	return func(o *FetchOptions) {
+		o.PassBinary = path
+	}
+}
+
 // Fetch retrieves a credential from the specified source.
 // Source formats:
 //   - pass:path/in/store - fetch from password store
 //   - env:VAR_NAME - fetch from env file
 //   - path/in/store - legacy format, assumed to be pass
-func Fetch(source string) (string, error) {
+func Fetch(source string, opts ...FetchOption) (string, error) {
+	options := &FetchOptions{
+		PassBinary: "/usr/bin/pass",
+	}
+	for _, opt := range opts {
+		opt(options)
+	}
+
 	switch {
 	case strings.HasPrefix(source, "env:"):
 		envName := strings.TrimPrefix(source, "env:")
 		return fetchFromEnvFile(envName)
 	case strings.HasPrefix(source, "pass:"):
 		passPath := strings.TrimPrefix(source, "pass:")
-		return fetchFromPass(passPath)
+		return fetchFromPass(options.PassBinary, passPath)
 	default:
 		// Legacy format: assume pass
-		return fetchFromPass(source)
+		return fetchFromPass(options.PassBinary, source)
 	}
 }
 
@@ -58,11 +80,11 @@ func fetchFromEnvFile(envName string) (string, error) {
 }
 
 // fetchFromPass retrieves a credential from the password store.
-func fetchFromPass(path string) (string, error) {
+func fetchFromPass(binary, path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "pass", path)
+	cmd := exec.CommandContext(ctx, binary, path)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("pass %s: %w", path, err)
