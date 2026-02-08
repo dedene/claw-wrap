@@ -1,6 +1,12 @@
 <div align="center">
   <img src="docs/assets/claw-wrap-hero.png" width="160" alt="claw-wrap lobster in a burrito" />
   <h1>claw-wrap</h1>
+  <p>
+    <a href="https://github.com/dedene/claw-wrap/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dedene/claw-wrap/actions/workflows/ci.yml/badge.svg" /></a>
+    <a href="https://go.dev/"><img alt="Go 1.24+" src="https://img.shields.io/badge/go-1.24+-00ADD8.svg" /></a>
+    <a href="https://goreportcard.com/report/github.com/dedene/claw-wrap"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/dedene/claw-wrap" /></a>
+    <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg" /></a>
+  </p>
   <p>A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes — credentials never enter the sandbox.</p>
   <p>
     <a href="docs/INSTALL.md">Install</a> ·
