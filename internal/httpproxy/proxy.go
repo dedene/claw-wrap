@@ -51,7 +51,9 @@ const (
 
 var (
 	validateRequestSecurityFunc = validateRequestSecurity
-	validateHostForSSRFFunc     = validateHostForSSRF
+	// safeTransportFunc and safeConnectDialFunc are injectable for testing.
+	safeTransportFunc   = safeTransport
+	safeConnectDialFunc = safeConnectDial
 )
 
 // WithPassBinary sets the pass binary path for credential resolution.
@@ -106,6 +108,11 @@ func New(cfg *config.HTTPProxyConfig, creds map[string]config.CredentialDef, opt
 
 	// Configure verbose logging based on config
 	p.server.Verbose = cfg.LogLevel == "debug"
+
+	// Configure safe transport with SSRF protection.
+	// The Control callback validates IPs after DNS resolution, preventing DNS rebinding.
+	p.server.Tr = safeTransportFunc()
+	p.server.ConnectDial = safeConnectDialFunc()
 
 	// Authenticate CONNECT before MITM.
 	p.server.OnRequest().HandleConnectFunc(p.handleConnect)
@@ -264,10 +271,8 @@ func (p *Proxy) handleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.R
 		return req, goproxy.NewResponse(req, "application/json", http.StatusBadRequest, `{"error":"invalid_request"}`)
 	}
 
-	if err := validateHostForSSRFFunc(canonicalHost); err != nil {
-		log.Printf("[WARN] proxy denied reason=ssrf_blocked target=%s err=%v", canonicalHost, err)
-		return req, goproxy.NewResponse(req, "application/json", http.StatusForbidden, `{"error":"request_denied"}`)
-	}
+	// Note: SSRF protection is now handled by the dialer's Control callback,
+	// which validates IPs after DNS resolution, preventing DNS rebinding attacks.
 
 	// Find matching route
 	route := p.findMatchingRoute(cfg, canonicalHost)
@@ -437,7 +442,12 @@ func (p *Proxy) proxyAuthRequiredConnectAction() *goproxy.ConnectAction {
 	return &goproxy.ConnectAction{
 		Action: goproxy.ConnectProxyAuthHijack,
 		Hijack: func(req *http.Request, client net.Conn, ctx *goproxy.ProxyCtx) {
-			_, _ = client.Write([]byte(fmt.Sprintf("Proxy-Authenticate: Basic realm=%q\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", proxyAuthRealm)))
+			// goproxy sends "HTTP/1.1 407 Proxy Authentication Required\r\n" before Hijack.
+			// We only need to send the headers and terminate.
+			_, _ = fmt.Fprintf(client,
+				"Proxy-Authenticate: Basic realm=%q\r\n"+
+					"Content-Length: 0\r\n"+
+					"Connection: close\r\n\r\n", proxyAuthRealm)
 			_ = client.Close()
 		},
 	}

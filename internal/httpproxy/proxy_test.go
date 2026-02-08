@@ -364,18 +364,19 @@ func TestProxy_handleRequest_HostMismatchRejected(t *testing.T) {
 	}
 }
 
-func TestProxy_handleRequest_BlocksSSRF(t *testing.T) {
+func TestProxy_handleRequest_PassesThroughSSRF(t *testing.T) {
+	// SSRF protection is now handled at dial-time via the safeDialer's Control callback,
+	// not in handleRequest. This test verifies handleRequest passes through the request.
+	// See ssrf_test.go for dial-time SSRF blocking tests.
 	proxy := New(&config.HTTPProxyConfig{Enabled: true}, nil, WithAuthToken(testProxyAuthToken))
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/private", nil)
 	req.Host = "127.0.0.1"
 	req.Header.Set("Proxy-Authorization", basicProxyAuthHeader(proxyAuthUser, testProxyAuthToken))
 
 	_, resp := proxy.handleRequest(req, &goproxy.ProxyCtx{Req: req})
-	if resp == nil {
-		t.Fatal("expected SSRF block response")
-	}
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	// handleRequest should pass through (nil response) - SSRF is blocked at dial time
+	if resp != nil {
+		t.Errorf("expected nil response (pass through), got status %d", resp.StatusCode)
 	}
 }
 
@@ -642,10 +643,22 @@ func TestSetupFromConfig_Disabled(t *testing.T) {
 
 func disableSSRFForTest(t *testing.T) {
 	t.Helper()
-	orig := validateHostForSSRFFunc
-	validateHostForSSRFFunc = func(host string) error { return nil }
+	// Override transport and dial functions to allow localhost connections in tests.
+	// The safe dialer blocks private IPs including localhost, which breaks tests
+	// using local mock servers.
+	origTransport := safeTransportFunc
+	origDial := safeConnectDialFunc
+
+	safeTransportFunc = func() *http.Transport {
+		return &http.Transport{} // Default transport without SSRF protection
+	}
+	safeConnectDialFunc = func() func(string, string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 30 * time.Second}).Dial
+	}
+
 	t.Cleanup(func() {
-		validateHostForSSRFFunc = orig
+		safeTransportFunc = origTransport
+		safeConnectDialFunc = origDial
 	})
 }
 
