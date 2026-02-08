@@ -22,9 +22,10 @@ var findTrustedBinaryFunc = paths.FindTrustedBinary
 
 // FetchOptions holds configuration for credential fetching.
 type FetchOptions struct {
-	PassBinary string
-	OPBinary   string
-	BWBinary   string
+	PassBinary  string
+	OPBinary    string
+	BWBinary    string
+	BypassCache bool
 }
 
 // FetchOption configures credential fetching.
@@ -48,6 +49,13 @@ func WithOPBinary(path string) FetchOption {
 func WithBWBinary(path string) FetchOption {
 	return func(o *FetchOptions) {
 		o.BWBinary = path
+	}
+}
+
+// WithBypassCache forces live credential fetches and bypasses result caching.
+func WithBypassCache() FetchOption {
+	return func(o *FetchOptions) {
+		o.BypassCache = true
 	}
 }
 
@@ -77,43 +85,75 @@ func Fetch(source string, opts ...FetchOption) (string, error) {
 	}
 
 	ctx := context.Background()
+	cacheEligible := isCredentialCacheableBackend(parsed.Backend) && !options.BypassCache
+	cacheKey := ""
+	now := credentialCacheNow()
+	if cacheEligible {
+		cacheKey = credentialCacheKey(parsed)
+		if cached, ok := credentialResultCache.Get(cacheKey, now); ok {
+			return cached, nil
+		}
+	}
 
+	var result string
 	switch parsed.Backend {
 	case BackendEnv:
-		result, err := fetchFromEnvFile(parsed.Path)
+		result, err = fetchFromEnvFile(parsed.Path)
 		if err != nil {
 			return "", err
 		}
 		if parsed.HasJQ() {
-			return ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+			result, err = ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+			if err != nil {
+				return "", err
+			}
 		}
-		return result, nil
 
 	case BackendPass:
-		result, err := fetchFromPass(options.PassBinary, parsed.Path)
+		result, err = fetchFromPass(options.PassBinary, parsed.Path)
 		if err != nil {
 			return "", err
 		}
 		if parsed.HasJQ() {
-			return ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+			result, err = ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+			if err != nil {
+				return "", err
+			}
 		}
-		return result, nil
 
 	case Backend1Password:
-		return fetchFrom1Password(ctx, parsed, options.OPBinary)
+		result, err = fetchFrom1Password(ctx, parsed, options.OPBinary)
+		if err != nil {
+			return "", err
+		}
 
 	case BackendAge:
-		return fetchFromAge(ctx, parsed)
+		result, err = fetchFromAge(ctx, parsed)
+		if err != nil {
+			return "", err
+		}
 
 	case BackendKeychain:
-		return fetchFromKeychain(ctx, parsed)
+		result, err = fetchFromKeychain(ctx, parsed)
+		if err != nil {
+			return "", err
+		}
 
 	case BackendBitwarden:
-		return fetchFromBitwarden(ctx, parsed, options.BWBinary)
+		result, err = fetchFromBitwarden(ctx, parsed, options.BWBinary)
+		if err != nil {
+			return "", err
+		}
 
 	default:
 		return "", fmt.Errorf("unknown credential backend")
 	}
+
+	if cacheEligible && result != "" {
+		insertNow := credentialCacheNow()
+		credentialResultCache.Set(cacheKey, result, insertNow)
+	}
+	return result, nil
 }
 
 // fetchFromEnvFile reads a credential from the env file.

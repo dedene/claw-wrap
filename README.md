@@ -113,6 +113,7 @@ proxy:
   max_stdin_message_size: 1MB
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
+  credential_cache_ttl: 0s
   max_output_size: 100MB
   max_connection_lifetime: 30m
 

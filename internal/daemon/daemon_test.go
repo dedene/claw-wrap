@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDaemon_ReloadConfig(t *testing.T) {
@@ -167,6 +168,7 @@ func TestDaemon_ReloadConfig_SetsBackendTokenPaths(t *testing.T) {
 proxy:
   age_identity_file: /tmp/age-a
   op_token_file: /tmp/op-a
+  credential_cache_ttl: 20s
 tools: {}
 `
 	if err := os.WriteFile(configPath, []byte(initialConfig), 0o644); err != nil {
@@ -175,18 +177,24 @@ tools: {}
 
 	origSetAge := setAgeIdentityFileFunc
 	origSetOP := setOPTokenFileFunc
+	origSetCacheTTL := setCredentialCacheTTLFunc
 	defer func() {
 		setAgeIdentityFileFunc = origSetAge
 		setOPTokenFileFunc = origSetOP
+		setCredentialCacheTTLFunc = origSetCacheTTL
 	}()
 
 	var seenAge []string
 	var seenOP []string
+	var seenCacheTTL []time.Duration
 	setAgeIdentityFileFunc = func(path string) {
 		seenAge = append(seenAge, path)
 	}
 	setOPTokenFileFunc = func(path string) {
 		seenOP = append(seenOP, path)
+	}
+	setCredentialCacheTTLFunc = func(ttl time.Duration) {
+		seenCacheTTL = append(seenCacheTTL, ttl)
 	}
 
 	d := New(WithConfigPath(configPath))
@@ -198,6 +206,7 @@ tools: {}
 proxy:
   age_identity_file: /tmp/age-b
   op_token_file: /tmp/op-b
+  credential_cache_ttl: 45s
 tools: {}
 `
 	if err := os.WriteFile(configPath, []byte(updatedConfig), 0o644); err != nil {
@@ -219,6 +228,12 @@ tools: {}
 	if seenOP[0] != "/tmp/op-a" || seenOP[1] != "/tmp/op-b" {
 		t.Fatalf("setOPTokenFileFunc calls = %v, want [/tmp/op-a /tmp/op-b]", seenOP)
 	}
+	if len(seenCacheTTL) != 2 {
+		t.Fatalf("setCredentialCacheTTLFunc called %d times, want 2", len(seenCacheTTL))
+	}
+	if seenCacheTTL[0] != 20*time.Second || seenCacheTTL[1] != 45*time.Second {
+		t.Fatalf("setCredentialCacheTTLFunc calls = %v, want [20s 45s]", seenCacheTTL)
+	}
 }
 
 func TestDaemon_Run_ConfiguresBackendsAndCleansUpOnFailure(t *testing.T) {
@@ -228,6 +243,7 @@ func TestDaemon_Run_ConfiguresBackendsAndCleansUpOnFailure(t *testing.T) {
 proxy:
   age_identity_file: /tmp/startup-age
   op_token_file: /tmp/startup-op
+  credential_cache_ttl: 30s
   hmac_secret_file: /this/path/does/not/exist/auth
 tools: {}
 `
@@ -237,10 +253,12 @@ tools: {}
 
 	origSetAge := setAgeIdentityFileFunc
 	origSetOP := setOPTokenFileFunc
+	origSetCacheTTL := setCredentialCacheTTLFunc
 	origCleanup := cleanupBWSessionFunc
 	defer func() {
 		setAgeIdentityFileFunc = origSetAge
 		setOPTokenFileFunc = origSetOP
+		setCredentialCacheTTLFunc = origSetCacheTTL
 		cleanupBWSessionFunc = origCleanup
 	}()
 
@@ -251,6 +269,10 @@ tools: {}
 	setOPPath := ""
 	setOPTokenFileFunc = func(path string) {
 		setOPPath = path
+	}
+	setCacheTTL := time.Duration(0)
+	setCredentialCacheTTLFunc = func(ttl time.Duration) {
+		setCacheTTL = ttl
 	}
 
 	cleanupCalls := 0
@@ -272,6 +294,9 @@ tools: {}
 	}
 	if setOPPath != "/tmp/startup-op" {
 		t.Fatalf("setOPTokenFileFunc path = %q, want %q", setOPPath, "/tmp/startup-op")
+	}
+	if setCacheTTL != 30*time.Second {
+		t.Fatalf("setCredentialCacheTTLFunc ttl = %v, want 30s", setCacheTTL)
 	}
 	if cleanupCalls != 1 {
 		t.Fatalf("cleanupBWSessionFunc calls = %d, want 1", cleanupCalls)
