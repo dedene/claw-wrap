@@ -57,6 +57,13 @@ func main() {
 		err = runCheck()
 	case "install":
 		err = runInstall()
+	case "keychain-setup":
+		if !keychainSetupAvailable {
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+			printHelp()
+			os.Exit(1)
+		}
+		err = runKeychainSetup()
 	case "version", "-v", "--version":
 		fmt.Printf("claw-wrap %s\n", version)
 	case "help", "-h", "--help":
@@ -166,6 +173,7 @@ func runCheck() error {
 func runInstall() error {
 	// Parse flags
 	var installDir, configPath string
+	force := false
 	for i := 2; i < len(os.Args); i++ {
 		switch {
 		case os.Args[i] == "--install-dir" && i+1 < len(os.Args):
@@ -174,6 +182,8 @@ func runInstall() error {
 		case os.Args[i] == "--config" && i+1 < len(os.Args):
 			configPath = os.Args[i+1]
 			i++
+		case os.Args[i] == "--force":
+			force = true
 		}
 	}
 
@@ -203,7 +213,7 @@ func runInstall() error {
 
 	fmt.Printf("Installing symlinks in %s -> %s\n", installDir, clawWrapPath)
 
-	var installed, failed int
+	var created, replaced, unchanged, failed, conflicts int
 	for toolName := range cfg.Tools {
 		if !safeToolNameRegex.MatchString(toolName) {
 			fmt.Printf("  %-12s FAILED (invalid tool name)\n", toolName)
@@ -212,14 +222,40 @@ func runInstall() error {
 		}
 
 		linkPath := filepath.Join(installDir, toolName)
+		replacing := false
 
-		// Remove existing file/symlink
-		if _, err := os.Lstat(linkPath); err == nil {
-			if err := os.Remove(linkPath); err != nil {
+		if info, err := os.Lstat(linkPath); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				alreadyLinked, err := symlinkPointsTo(linkPath, clawWrapPath)
+				if err != nil {
+					fmt.Printf("  %-12s FAILED (read symlink: %v)\n", toolName, err)
+					failed++
+					continue
+				}
+				if alreadyLinked {
+					fmt.Printf("  %-12s OK (already linked)\n", toolName)
+					unchanged++
+					continue
+				}
+			}
+
+			if !force {
+				fmt.Printf("  %-12s FAILED (conflict: %s exists, re-run with --force)\n", toolName, linkPath)
+				conflicts++
+				failed++
+				continue
+			}
+
+			if err := removeInstallTarget(linkPath, info); err != nil {
 				fmt.Printf("  %-12s FAILED (remove: %v)\n", toolName, err)
 				failed++
 				continue
 			}
+			replacing = true
+		} else if !os.IsNotExist(err) {
+			fmt.Printf("  %-12s FAILED (lstat: %v)\n", toolName, err)
+			failed++
+			continue
 		}
 
 		// Create symlink
@@ -229,15 +265,52 @@ func runInstall() error {
 			continue
 		}
 
-		fmt.Printf("  %-12s -> claw-wrap\n", toolName)
-		installed++
+		if replacing {
+			fmt.Printf("  %-12s replaced -> claw-wrap\n", toolName)
+			replaced++
+		} else {
+			fmt.Printf("  %-12s -> claw-wrap\n", toolName)
+			created++
+		}
 	}
 
+	total := created + replaced + unchanged + failed
 	if failed > 0 {
-		return fmt.Errorf("%d/%d symlinks failed — try:\n  sudo $(which claw-wrap) install", failed, installed+failed)
+		if conflicts > 0 && !force {
+			return fmt.Errorf("%d/%d symlinks failed (%d conflicts) — re-run with --force to replace existing targets", failed, total, conflicts)
+		}
+		return fmt.Errorf("%d/%d symlinks failed", failed, total)
 	}
-	fmt.Printf("Done. %d symlinks installed.\n", installed)
+	fmt.Printf("Done. %d created, %d replaced, %d unchanged.\n", created, replaced, unchanged)
 	return nil
+}
+
+func removeInstallTarget(path string, info os.FileInfo) error {
+	if info.IsDir() {
+		return fmt.Errorf("%s exists and is a directory (will not remove)", path)
+	}
+	return os.Remove(path)
+}
+
+func symlinkPointsTo(linkPath, targetPath string) (bool, error) {
+	actualTarget, err := os.Readlink(linkPath)
+	if err != nil {
+		return false, err
+	}
+	if !filepath.IsAbs(actualTarget) {
+		actualTarget = filepath.Join(filepath.Dir(linkPath), actualTarget)
+	}
+	return normalizeInstallPath(actualTarget) == normalizeInstallPath(targetPath), nil
+}
+
+func normalizeInstallPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
 }
 
 func warnVersionMismatch(daemonVersion string) {
@@ -260,6 +333,10 @@ func selfExePath() (string, error) {
 }
 
 func printHelp() {
+	keychainLine := ""
+	if keychainSetupAvailable {
+		keychainLine = "  keychain-setup  Add credential to macOS Keychain\n"
+	}
 	fmt.Printf(`claw-wrap %s - OpenClaw credential wrapper
 
 Usage:
@@ -267,17 +344,20 @@ Usage:
   <toolname> [args...]    (when invoked via symlink)
 
 Commands:
-  daemon     Start the secrets daemon
-  list       List configured tools
-  check      Verify all credentials are accessible
-  install [--install-dir DIR] [--config PATH]  Create symlinks
-  version    Show version
-  help       Show this help
+  daemon          Start the secrets daemon
+  list            List configured tools
+  check           Verify all credentials are accessible
+  install         Create symlinks for all tools
+                  --install-dir PATH  Install location (default: /usr/local/bin)
+                  --config PATH       Config file path
+                  --force             Replace existing files
+%s  version         Show version
+  help            Show this help
 
 Examples:
   claw-wrap daemon         # Start daemon
   claw-wrap list           # Show tools
   sudo claw-wrap install   # Create symlinks
   bird whoami              # Run bird with credentials (via symlink)
-`, version)
+`, version, keychainLine)
 }

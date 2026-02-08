@@ -18,10 +18,13 @@ import (
 // DefaultEnvFile is the path to the env file with service credentials.
 var DefaultEnvFile = paths.EnvFile()
 var currentEUIDFunc = os.Geteuid
+var findTrustedBinaryFunc = paths.FindTrustedBinary
 
 // FetchOptions holds configuration for credential fetching.
 type FetchOptions struct {
 	PassBinary string
+	OPBinary   string
+	BWBinary   string
 }
 
 // FetchOption configures credential fetching.
@@ -34,11 +37,31 @@ func WithPassBinary(path string) FetchOption {
 	}
 }
 
+// WithOPBinary sets the path to the 1Password CLI binary.
+func WithOPBinary(path string) FetchOption {
+	return func(o *FetchOptions) {
+		o.OPBinary = path
+	}
+}
+
+// WithBWBinary sets the path to the Bitwarden CLI binary.
+func WithBWBinary(path string) FetchOption {
+	return func(o *FetchOptions) {
+		o.BWBinary = path
+	}
+}
+
 // Fetch retrieves a credential from the specified source.
 // Source formats:
 //   - pass:path/in/store - fetch from password store
 //   - env:VAR_NAME - fetch from env file
+//   - op://vault/item/field - fetch from 1Password
+//   - age:/path/to/file.age - decrypt age-encrypted file
+//   - keychain:service-name - fetch from macOS Keychain
+//   - bw:item-uuid - fetch from Bitwarden
 //   - path/in/store - legacy format, assumed to be pass
+//
+// All sources optionally support jq extraction: "source | .jq_expr"
 func Fetch(source string, opts ...FetchOption) (string, error) {
 	options := &FetchOptions{
 		PassBinary: paths.DefaultPassBinary(),
@@ -47,16 +70,49 @@ func Fetch(source string, opts ...FetchOption) (string, error) {
 		opt(options)
 	}
 
-	switch {
-	case strings.HasPrefix(source, "env:"):
-		envName := strings.TrimPrefix(source, "env:")
-		return fetchFromEnvFile(envName)
-	case strings.HasPrefix(source, "pass:"):
-		passPath := strings.TrimPrefix(source, "pass:")
-		return fetchFromPass(options.PassBinary, passPath)
+	// Parse the source to determine backend and extract jq
+	parsed, err := ParseSource(source)
+	if err != nil {
+		return "", fmt.Errorf("invalid credential source")
+	}
+
+	ctx := context.Background()
+
+	switch parsed.Backend {
+	case BackendEnv:
+		result, err := fetchFromEnvFile(parsed.Path)
+		if err != nil {
+			return "", err
+		}
+		if parsed.HasJQ() {
+			return ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+		}
+		return result, nil
+
+	case BackendPass:
+		result, err := fetchFromPass(options.PassBinary, parsed.Path)
+		if err != nil {
+			return "", err
+		}
+		if parsed.HasJQ() {
+			return ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+		}
+		return result, nil
+
+	case Backend1Password:
+		return fetchFrom1Password(ctx, parsed, options.OPBinary)
+
+	case BackendAge:
+		return fetchFromAge(ctx, parsed)
+
+	case BackendKeychain:
+		return fetchFromKeychain(ctx, parsed)
+
+	case BackendBitwarden:
+		return fetchFromBitwarden(ctx, parsed, options.BWBinary)
+
 	default:
-		// Legacy format: assume pass
-		return fetchFromPass(options.PassBinary, source)
+		return "", fmt.Errorf("unknown credential backend")
 	}
 }
 

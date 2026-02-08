@@ -43,6 +43,22 @@ func TestWithPassBinary(t *testing.T) {
 	}
 }
 
+func TestWithOPBinary(t *testing.T) {
+	opts := &FetchOptions{}
+	WithOPBinary("/custom/op")(opts)
+	if opts.OPBinary != "/custom/op" {
+		t.Errorf("OPBinary = %q, want %q", opts.OPBinary, "/custom/op")
+	}
+}
+
+func TestWithBWBinary(t *testing.T) {
+	opts := &FetchOptions{}
+	WithBWBinary("/custom/bw")(opts)
+	if opts.BWBinary != "/custom/bw" {
+		t.Errorf("BWBinary = %q, want %q", opts.BWBinary, "/custom/bw")
+	}
+}
+
 func TestFetch_DefaultPassBinary(t *testing.T) {
 	// Verify the default is /usr/bin/pass when no option is provided.
 	options := &FetchOptions{PassBinary: "/usr/bin/pass"}
@@ -116,6 +132,46 @@ func TestFetch_EnvPrefix_MissingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "open env file") {
 		t.Errorf("error = %q, want it to mention opening env file", err.Error())
+	}
+}
+
+func TestFetch_EnvWithJQ(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte(`MY_JSON={"password":"abc123"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	orig := DefaultEnvFile
+	DefaultEnvFile = envFile
+	defer func() { DefaultEnvFile = orig }()
+
+	value, err := Fetch("env:MY_JSON | .password")
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if value != "abc123" {
+		t.Errorf("Fetch() = %q, want %q", value, "abc123")
+	}
+}
+
+func TestFetch_EnvWithJQ_InvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+	if err := os.WriteFile(envFile, []byte("MY_TOKEN=abc123\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	orig := DefaultEnvFile
+	DefaultEnvFile = envFile
+	defer func() { DefaultEnvFile = orig }()
+
+	_, err := Fetch("env:MY_TOKEN | .password")
+	if err == nil {
+		t.Fatal("Fetch() should fail when jq is used with non-JSON env value")
+	}
+	if !strings.Contains(err.Error(), "invalid JSON") {
+		t.Errorf("error = %q, want invalid JSON", err.Error())
 	}
 }
 

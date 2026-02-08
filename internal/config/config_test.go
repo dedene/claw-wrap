@@ -244,6 +244,80 @@ func TestGetPassBinary(t *testing.T) {
 	}
 }
 
+func TestGetOPBinary(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "nil proxy returns empty for PATH lookup",
+			cfg:  Config{},
+			want: "",
+		},
+		{
+			name: "empty op_binary returns empty",
+			cfg:  Config{Proxy: &ProxyConfig{}},
+			want: "",
+		},
+		{
+			name: "configured absolute path returned",
+			cfg:  Config{Proxy: &ProxyConfig{OPBinary: "/custom/op"}},
+			want: "/custom/op",
+		},
+		{
+			name: "relative path rejected",
+			cfg:  Config{Proxy: &ProxyConfig{OPBinary: "op"}},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetOPBinary(); got != tt.want {
+				t.Errorf("GetOPBinary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetBWBinary(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "nil proxy returns empty for PATH lookup",
+			cfg:  Config{},
+			want: "",
+		},
+		{
+			name: "empty bw_binary returns empty",
+			cfg:  Config{Proxy: &ProxyConfig{}},
+			want: "",
+		},
+		{
+			name: "configured absolute path returned",
+			cfg:  Config{Proxy: &ProxyConfig{BWBinary: "/custom/bw"}},
+			want: "/custom/bw",
+		},
+		{
+			name: "relative path rejected",
+			cfg:  Config{Proxy: &ProxyConfig{BWBinary: "bw"}},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetBWBinary(); got != tt.want {
+				t.Errorf("GetBWBinary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_PassBinaryFromYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
