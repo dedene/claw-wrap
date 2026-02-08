@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -299,5 +300,115 @@ func TestBuildEnvironment_ReqEnvCannotOverrideForcedEnv(t *testing.T) {
 	}
 	if val != "admin-value" {
 		t.Errorf("SOME_KEY = %q, want %q (forced_env must win)", val, "admin-value")
+	}
+}
+
+func TestBuildAuthenticatedProxyURL(t *testing.T) {
+	token := "token-with:/?special#chars"
+	rawURL, err := buildAuthenticatedProxyURL("127.0.0.1:8080", token)
+	if err != nil {
+		t.Fatalf("buildAuthenticatedProxyURL() error: %v", err)
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("url.Parse() error: %v", err)
+	}
+	if parsed.Scheme != "http" {
+		t.Fatalf("scheme = %q, want %q", parsed.Scheme, "http")
+	}
+	if parsed.Host != "127.0.0.1:8080" {
+		t.Fatalf("host = %q, want %q", parsed.Host, "127.0.0.1:8080")
+	}
+	if parsed.User == nil {
+		t.Fatal("missing user info")
+	}
+	if got := parsed.User.Username(); got != "claw" {
+		t.Fatalf("username = %q, want %q", got, "claw")
+	}
+	pass, ok := parsed.User.Password()
+	if !ok {
+		t.Fatal("missing password")
+	}
+	if pass != token {
+		t.Fatalf("password = %q, want %q", pass, token)
+	}
+}
+
+func TestBuildEnvironment_UseProxyInjectsAuthenticatedURL(t *testing.T) {
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{},
+		tool: &config.ToolDef{
+			UseProxy: true,
+		},
+		cfg: &config.Config{
+			HTTPProxy: &config.HTTPProxyConfig{
+				Enabled: true,
+				Listen:  "127.0.0.1:9090",
+				CA: config.CAConfig{
+					Path: "/tmp/test-ca",
+				},
+			},
+		},
+		proxyAuthToken: "test-token",
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	proxyURL, found := envContains(env, "HTTP_PROXY")
+	if !found {
+		t.Fatal("HTTP_PROXY not set")
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		t.Fatalf("url.Parse(HTTP_PROXY) error: %v", err)
+	}
+	if parsed.Host != "127.0.0.1:9090" {
+		t.Fatalf("HTTP_PROXY host = %q, want %q", parsed.Host, "127.0.0.1:9090")
+	}
+	if parsed.User == nil {
+		t.Fatal("HTTP_PROXY missing user info")
+	}
+	if got := parsed.User.Username(); got != "claw" {
+		t.Fatalf("HTTP_PROXY username = %q, want %q", got, "claw")
+	}
+
+	if _, found := envContains(env, "SSL_CERT_FILE"); !found {
+		t.Fatal("SSL_CERT_FILE not set")
+	}
+	if _, found := envContains(env, "NODE_EXTRA_CA_CERTS"); !found {
+		t.Fatal("NODE_EXTRA_CA_CERTS not set")
+	}
+	if _, found := envContains(env, "REQUESTS_CA_BUNDLE"); !found {
+		t.Fatal("REQUESTS_CA_BUNDLE not set")
+	}
+	if _, found := envContains(env, "CURL_CA_BUNDLE"); !found {
+		t.Fatal("CURL_CA_BUNDLE not set")
+	}
+}
+
+func TestBuildEnvironment_UseProxyRequiresToken(t *testing.T) {
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{},
+		tool: &config.ToolDef{
+			UseProxy: true,
+		},
+		cfg: &config.Config{
+			HTTPProxy: &config.HTTPProxyConfig{
+				Enabled: true,
+				Listen:  "127.0.0.1:9090",
+			},
+		},
+	}
+
+	_, err := executor.buildEnvironment()
+	if err == nil {
+		t.Fatal("buildEnvironment() should fail when proxy auth token is missing")
+	}
+	if !strings.Contains(err.Error(), "missing proxy auth token") {
+		t.Fatalf("error = %v, want missing proxy auth token", err)
 	}
 }

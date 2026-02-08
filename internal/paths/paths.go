@@ -34,6 +34,11 @@ func EnvFile() string {
 	return filepath.Join(RuntimeDir(), "env")
 }
 
+// ProxyAuthTokenPath returns the default HTTP proxy auth token file path.
+func ProxyAuthTokenPath() string {
+	return filepath.Join(RuntimeDir(), "proxy-auth-token")
+}
+
 // ConfigPath returns the default config file path.
 func ConfigPath() string {
 	return "/etc/openclaw/wrappers.yaml"
@@ -55,6 +60,20 @@ func DefaultAgeIdentityFile() string {
 // DefaultOPTokenFile returns the default 1Password token file path.
 func DefaultOPTokenFile() string {
 	return "/etc/openclaw/1password.token"
+}
+
+// CADir returns the default CA certificate directory.
+//   - Linux: /etc/openclaw/ca (system-wide, matches systemd deployment)
+//   - macOS: ~/.claw-wrap/ca (user-writable, no sudo needed)
+func CADir() string {
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "/tmp/claw-wrap/ca"
+		}
+		return filepath.Join(home, ".claw-wrap", "ca")
+	}
+	return "/etc/openclaw/ca"
 }
 
 // DefaultPassBinary returns the default pass binary path.

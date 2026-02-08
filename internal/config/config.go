@@ -67,10 +67,62 @@ type SecurityConfig struct {
 	DenyUnverifiedCallerExe bool `yaml:"deny_unverified_caller_exe"`
 }
 
+// HTTPProxyConfig holds HTTP proxy configuration.
+type HTTPProxyConfig struct {
+	Enabled              bool          `yaml:"enabled"`
+	Listen               string        `yaml:"listen"`
+	RequireAuth          *bool         `yaml:"require_auth"` // default true
+	LogLevel             string        `yaml:"log_level"`    // none, errors, info, debug
+	CA                   CAConfig      `yaml:"ca"`
+	StripResponseHeaders []string      `yaml:"strip_response_headers"`
+	Routes               []ProxyRoute  `yaml:"routes"`
+}
+
+// GetRequireAuth returns whether proxy auth is required (default: true).
+func (c *HTTPProxyConfig) GetRequireAuth() bool {
+	if c.RequireAuth == nil {
+		return true
+	}
+	return *c.RequireAuth
+}
+
+// CAConfig holds CA certificate configuration for MITM proxy.
+type CAConfig struct {
+	Path         string `yaml:"path"`
+	ValidityDays int    `yaml:"validity_days"`
+	Organization string `yaml:"organization"`
+}
+
+// ProxyRoute defines a route for credential injection.
+type ProxyRoute struct {
+	Host   string     `yaml:"host"`
+	Inject InjectSpec `yaml:"inject"`
+	Allow  []string   `yaml:"allow,omitempty"`
+	Deny   []string   `yaml:"deny,omitempty"`
+
+	// Compiled at validation time (not serialized)
+	HostRegex  *regexp.Regexp `yaml:"-"`
+	AllowRules []PathRule     `yaml:"-"`
+	DenyRules  []PathRule     `yaml:"-"`
+}
+
+// PathRule represents a compiled method/path pattern.
+type PathRule struct {
+	Method  string         // HTTP method or "*" for any
+	Pattern *regexp.Regexp // Compiled path pattern
+}
+
+// InjectSpec defines which header to inject and its value template.
+type InjectSpec struct {
+	Header string `yaml:"header"`
+	Value  string `yaml:"value"`
+}
+
 // Config is the root configuration structure.
 type Config struct {
 	Proxy       *ProxyConfig             `yaml:"proxy,omitempty"`
 	Security    *SecurityConfig          `yaml:"security,omitempty"`
+	HTTPProxy   *HTTPProxyConfig         `yaml:"http_proxy,omitempty"`
 	Credentials map[string]CredentialDef `yaml:"credentials"`
 	Tools       map[string]ToolDef       `yaml:"tools"`
 }
@@ -88,6 +140,7 @@ type ToolDef struct {
 	ForcedEnv   map[string]string `yaml:"forced_env,omitempty"`
 	BlockedArgs []BlockedArg      `yaml:"blocked_args,omitempty"`
 	ConfigFile  *ConfigFileDef    `yaml:"config_file,omitempty"`
+	UseProxy    bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
 }
 
 // BlockedArg defines a blocked argument pattern.
@@ -217,7 +270,163 @@ func (c *Config) Validate() error {
 			c.Tools[toolName].BlockedArgs[i].Compiled = re
 		}
 	}
+	// Validate HTTP proxy configuration
+	if c.HTTPProxy != nil && c.HTTPProxy.Enabled {
+		if err := c.validateHTTPProxy(); err != nil {
+			return fmt.Errorf("http_proxy: %w", err)
+		}
+	}
+
 	return nil
+}
+
+func (c *Config) validateHTTPProxy() error {
+	cfg := c.HTTPProxy
+
+	// Validate log level
+	switch cfg.LogLevel {
+	case "", "none", "errors", "info", "debug":
+	default:
+		return fmt.Errorf("invalid log_level %q (must be none, errors, info, or debug)", cfg.LogLevel)
+	}
+
+	// Validate CA config
+	if cfg.CA.ValidityDays < 0 {
+		return fmt.Errorf("ca.validity_days must be non-negative")
+	}
+
+	// Validate and compile routes
+	for i := range cfg.Routes {
+		route := &cfg.Routes[i]
+
+		if route.Host == "" {
+			return fmt.Errorf("route[%d]: host is required", i)
+		}
+
+		// Compile host pattern
+		hostRegex, err := compileHostPattern(route.Host)
+		if err != nil {
+			return fmt.Errorf("route[%d]: invalid host pattern %q: %w", i, route.Host, err)
+		}
+		route.HostRegex = hostRegex
+
+		// Validate inject spec
+		if route.Inject.Header == "" {
+			return fmt.Errorf("route[%d]: inject.header is required", i)
+		}
+		if route.Inject.Value == "" {
+			return fmt.Errorf("route[%d]: inject.value is required", i)
+		}
+
+		// Validate credential references exist
+		refs := extractCredentialRefs(route.Inject.Value)
+		for _, ref := range refs {
+			if _, ok := c.Credentials[ref]; !ok {
+				return fmt.Errorf("route[%d]: unknown credential %q in inject.value", i, ref)
+			}
+		}
+
+		// Compile allow rules
+		for j, pattern := range route.Allow {
+			rule, err := compilePathRule(pattern)
+			if err != nil {
+				return fmt.Errorf("route[%d].allow[%d]: %w", i, j, err)
+			}
+			route.AllowRules = append(route.AllowRules, rule)
+		}
+
+		// Compile deny rules
+		for j, pattern := range route.Deny {
+			rule, err := compilePathRule(pattern)
+			if err != nil {
+				return fmt.Errorf("route[%d].deny[%d]: %w", i, j, err)
+			}
+			route.DenyRules = append(route.DenyRules, rule)
+		}
+	}
+
+	return nil
+}
+
+// compileHostPattern compiles a host pattern (exact or *.suffix) to regex.
+// Suffix-anchored to prevent subdomain attacks.
+func compileHostPattern(pattern string) (*regexp.Regexp, error) {
+	if pattern == "" {
+		return nil, fmt.Errorf("empty pattern")
+	}
+
+	// Escape special regex chars except *
+	escaped := regexp.QuoteMeta(pattern)
+
+	// Handle wildcard prefix *.
+	if strings.HasPrefix(pattern, "*.") {
+		// *.example.com -> matches sub.example.com but NOT example.com
+		// Suffix-anchored: must end with .example.com
+		suffix := escaped[4:] // Remove escaped \*\.
+		return regexp.Compile(`^[^.]+\.` + suffix + `$`)
+	}
+
+	// Exact match
+	return regexp.Compile(`^` + escaped + `$`)
+}
+
+// compilePathRule compiles a "METHOD /path/pattern" string.
+// Supports * for single path segment and ** for rest of path.
+func compilePathRule(pattern string) (PathRule, error) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return PathRule{}, fmt.Errorf("empty pattern")
+	}
+
+	parts := strings.SplitN(pattern, " ", 2)
+	method := "*"
+	pathPattern := pattern
+
+	if len(parts) == 2 {
+		method = strings.ToUpper(parts[0])
+		pathPattern = parts[1]
+	}
+
+	// Validate method
+	switch method {
+	case "*", "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS":
+	default:
+		return PathRule{}, fmt.Errorf("invalid method %q", method)
+	}
+
+	// Compile path pattern
+	// Escape special regex chars
+	escaped := regexp.QuoteMeta(pathPattern)
+
+	// Replace ** first (matches rest of path)
+	escaped = strings.ReplaceAll(escaped, `\*\*`, `.*`)
+	// Replace * (matches single segment)
+	escaped = strings.ReplaceAll(escaped, `\*`, `[^/]+`)
+
+	re, err := regexp.Compile(`^` + escaped + `$`)
+	if err != nil {
+		return PathRule{}, fmt.Errorf("invalid path pattern: %w", err)
+	}
+
+	return PathRule{Method: method, Pattern: re}, nil
+}
+
+// credentialRefRe matches {{name}} template placeholders for named credentials.
+var credentialRefRe = regexp.MustCompile(`\{\{([^}]+)\}\}`)
+
+// extractCredentialRefs extracts all credential reference names from a template string.
+func extractCredentialRefs(template string) []string {
+	matches := credentialRefRe.FindAllStringSubmatch(template, -1)
+	refs := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) > 1 {
+			ref := strings.TrimSpace(m[1])
+			if ref != "" {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	return refs
 }
 
 func validateConfigFileDef(def *ConfigFileDef) error {
@@ -535,6 +744,32 @@ func (c *Config) GetMaxConnectionLifetime() time.Duration {
 		return 0
 	}
 	return d
+}
+
+// GetHTTPProxyConfig returns the HTTP proxy configuration.
+func (c *Config) GetHTTPProxyConfig() *HTTPProxyConfig {
+	return c.HTTPProxy
+}
+
+// GetHTTPProxyEnabled returns whether HTTP proxy is enabled.
+func (c *Config) GetHTTPProxyEnabled() bool {
+	return c.HTTPProxy != nil && c.HTTPProxy.Enabled
+}
+
+// GetHTTPProxyListen returns the HTTP proxy listen address.
+func (c *Config) GetHTTPProxyListen() string {
+	if c.HTTPProxy == nil || c.HTTPProxy.Listen == "" {
+		return "127.0.0.1:8080"
+	}
+	return c.HTTPProxy.Listen
+}
+
+// GetHTTPProxyCAPath returns the CA directory path.
+func (c *Config) GetHTTPProxyCAPath() string {
+	if c.HTTPProxy == nil {
+		return ""
+	}
+	return c.HTTPProxy.CA.Path
 }
 
 // GetTimeout returns the tool-specific timeout or falls back to the global default.

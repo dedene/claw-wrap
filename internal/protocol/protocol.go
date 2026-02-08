@@ -79,6 +79,7 @@ type ToolInfo struct {
 // AdminCheckResponse contains credential check results.
 type AdminCheckResponse struct {
 	Credentials map[string]CredentialInfo `json:"credentials"`
+	HTTPProxy   *HTTPProxyInfo            `json:"http_proxy,omitempty"`
 	Version     string                    `json:"version,omitempty"`
 }
 
@@ -86,4 +87,12 @@ type AdminCheckResponse struct {
 type CredentialInfo struct {
 	Status  string `json:"status"`
 	Preview string `json:"preview,omitempty"`
+}
+
+// HTTPProxyInfo contains HTTP proxy status and usage info.
+type HTTPProxyInfo struct {
+	Enabled       bool   `json:"enabled"`
+	Listen        string `json:"listen,omitempty"`
+	CACertPath    string `json:"ca_cert_path,omitempty"`
+	AuthTokenPath string `json:"auth_token_path,omitempty"`
 }

@@ -3,8 +3,12 @@ package daemon
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -19,8 +23,10 @@ import (
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
 	"claw-wrap/internal/framing"
+	"claw-wrap/internal/httpproxy"
 	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
+	"golang.org/x/sys/unix"
 )
 
 // DefaultSocketPath is the default Unix socket path.
@@ -48,6 +54,10 @@ type Daemon struct {
 	connSem     chan struct{}
 	replayCache *auth.ReplayCache
 	metrics     *securityMetrics
+	httpProxy   *httpproxy.Proxy
+
+	proxyAuthToken     string
+	proxyAuthTokenPath string
 }
 
 var (
@@ -97,11 +107,12 @@ func New(opts ...Option) *Daemon {
 	}
 
 	d := &Daemon{
-		socketPath:      DefaultSocketPath,
-		configPath:      config.DefaultConfigPath,
-		allowedUID:      uint32(os.Getuid()),
-		allowedBinaries: []string{selfPath},
-		metrics:         newSecurityMetrics(),
+		socketPath:         DefaultSocketPath,
+		configPath:         config.DefaultConfigPath,
+		allowedUID:         uint32(os.Getuid()),
+		allowedBinaries:    []string{selfPath},
+		metrics:            newSecurityMetrics(),
+		proxyAuthTokenPath: paths.ProxyAuthTokenPath(),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -166,6 +177,12 @@ func (d *Daemon) Run() error {
 	d.connSem = make(chan struct{}, cfg.GetMaxConnections())
 	d.replayCache = auth.NewReplayCache(cfg.GetReplayCacheTTL(), cfg.GetReplayCacheMaxEntries())
 
+	// Start HTTP proxy if enabled
+	if err := d.startHTTPProxy(cfg); err != nil {
+		log.Printf("[WARN] HTTP proxy failed to start: %v", err)
+		// Continue without HTTP proxy - it's optional
+	}
+
 	go d.logMetricsLoop()
 	log.Printf("[INFO] Secrets daemon listening on %s", d.socketPath)
 
@@ -182,6 +199,9 @@ func (d *Daemon) Run() error {
 				continue
 			}
 			log.Println("[INFO] Shutting down...")
+			if err := d.stopHTTPProxy(); err != nil {
+				log.Printf("[WARN] HTTP proxy stop: %v", err)
+			}
 			listener.Close()
 			return
 		}
@@ -234,16 +254,74 @@ func (d *Daemon) reloadConfig() error {
 		return err
 	}
 
-	// Configure credential backends
-	setAgeIdentityFileFunc(newCfg.GetAgeIdentityFile())
-	setOPTokenFileFunc(newCfg.GetOPTokenFile())
-
 	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+
+	switch {
+	case d.httpProxy != nil && !newCfg.GetHTTPProxyEnabled():
+		if err := d.httpProxy.Stop(); err != nil {
+			return fmt.Errorf("stop HTTP proxy: %w", err)
+		}
+		d.httpProxy = nil
+	case d.httpProxy == nil && newCfg.GetHTTPProxyEnabled():
+		if err := d.startHTTPProxy(newCfg); err != nil {
+			return fmt.Errorf("start HTTP proxy: %w", err)
+		}
+	case d.httpProxy != nil && newCfg.GetHTTPProxyEnabled():
+		d.httpProxy.ReloadConfig(newCfg.GetHTTPProxyConfig(), newCfg.Credentials)
+	}
+
 	d.cfg = newCfg
 	if d.replayCache != nil {
 		d.replayCache.UpdateSettings(newCfg.GetReplayCacheTTL(), newCfg.GetReplayCacheMaxEntries())
 	}
+
+	// Configure credential backends only after config transition succeeds.
+	setAgeIdentityFileFunc(newCfg.GetAgeIdentityFile())
+	setOPTokenFileFunc(newCfg.GetOPTokenFile())
+
+	return nil
+}
+
+// startHTTPProxy starts the HTTP proxy if enabled in config.
+func (d *Daemon) startHTTPProxy(cfg *config.Config) error {
+	httpCfg := cfg.GetHTTPProxyConfig()
+	if httpCfg == nil || !httpCfg.Enabled {
+		return nil
+	}
+	requireAuth := httpCfg.GetRequireAuth()
+	if requireAuth {
+		if err := d.ensureProxyAuthToken(); err != nil {
+			return fmt.Errorf("initialize HTTP proxy auth token: %w", err)
+		}
+	}
+
+	proxy := httpproxy.New(httpCfg, cfg.Credentials,
+		httpproxy.WithPassBinary(cfg.GetPassBinary()),
+		httpproxy.WithOPBinary(cfg.GetOPBinary()),
+		httpproxy.WithBWBinary(cfg.GetBWBinary()),
+		httpproxy.WithAuthToken(d.proxyAuthToken),
+		httpproxy.WithRequireAuth(requireAuth),
+	)
+
+	if err := proxy.Start(proxy.ListenAddr()); err != nil {
+		return fmt.Errorf("start HTTP proxy: %w", err)
+	}
+
+	d.httpProxy = proxy
+	return nil
+}
+
+// stopHTTPProxy stops the HTTP proxy with proper mutex protection.
+func (d *Daemon) stopHTTPProxy() error {
+	d.cfgMu.Lock()
+	proxy := d.httpProxy
+	d.httpProxy = nil
 	d.cfgMu.Unlock()
+
+	if proxy != nil {
+		return proxy.Stop()
+	}
 	return nil
 }
 
@@ -431,6 +509,22 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 				resp.Credentials[name] = protocol.CredentialInfo{Status: "ok", Preview: credentialPreview(value)}
 			}
 		}
+		// Add HTTP proxy info if enabled
+		if cfg.HTTPProxy != nil && cfg.HTTPProxy.Enabled {
+			caPath := cfg.GetHTTPProxyCAPath()
+			if caPath == "" {
+				caPath = httpproxy.DefaultCAPath()
+			}
+			info := &protocol.HTTPProxyInfo{
+				Enabled:    true,
+				Listen:     cfg.GetHTTPProxyListen(),
+				CACertPath: filepath.Join(caPath, "ca.crt"),
+			}
+			if cfg.HTTPProxy.GetRequireAuth() {
+				info.AuthTokenPath = d.proxyAuthTokenPath
+			}
+			resp.HTTPProxy = info
+		}
 		d.sendJSON(conn, resp)
 
 	default:
@@ -502,10 +596,166 @@ func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Conf
 
 	log.Printf("[INFO] proxy tool=%s cwd=%s from=%s", req.Tool, req.Cwd, callerInfo)
 
-	executor := NewToolExecutor(conn, &req, &tool, cfg)
+	executor, err := NewToolExecutor(conn, &req, &tool, cfg, d.proxyAuthToken)
+	if err != nil {
+		log.Printf("[ERROR] executor init failed: %v", err)
+		d.sendProxyError(conn, err.Error())
+		return
+	}
 	if err := executor.Run(); err != nil {
 		log.Printf("[ERROR] executor failed: %v", err)
 	}
+}
+
+const proxyAuthTokenBytes = 32
+
+var errProxyAuthTokenNotFound = errors.New("proxy auth token file not found")
+
+func (d *Daemon) ensureProxyAuthToken() error {
+	if d.proxyAuthToken != "" {
+		return nil
+	}
+
+	token, err := loadProxyAuthToken(d.proxyAuthTokenPath)
+	if err == nil {
+		d.proxyAuthToken = token
+		return nil
+	}
+	if !errors.Is(err, errProxyAuthTokenNotFound) {
+		return err
+	}
+
+	token, err = generateProxyAuthToken()
+	if err != nil {
+		return err
+	}
+	if err := writeProxyAuthToken(d.proxyAuthTokenPath, token); err != nil {
+		return err
+	}
+	d.proxyAuthToken = token
+	return nil
+}
+
+func generateProxyAuthToken() (string, error) {
+	buf := make([]byte, proxyAuthTokenBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func loadProxyAuthToken(path string) (string, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		switch {
+		case errors.Is(err, unix.ENOENT):
+			return "", errProxyAuthTokenNotFound
+		case errors.Is(err, unix.ELOOP):
+			return "", fmt.Errorf("proxy auth token file must not be a symlink: %s", path)
+		default:
+			return "", fmt.Errorf("open proxy auth token file: %w", err)
+		}
+	}
+
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return "", fmt.Errorf("open proxy auth token file: failed to create file handle")
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat proxy auth token file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("proxy auth token file must be a regular file: %s", path)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		return "", fmt.Errorf("proxy auth token file permissions must be 0600: %s has %04o", path, perm)
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("unsupported proxy auth token file stat type")
+	}
+	if int(stat.Uid) != os.Geteuid() {
+		return "", fmt.Errorf("proxy auth token file owner must match daemon uid: %s owner=%d daemon=%d", path, stat.Uid, os.Geteuid())
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("read proxy auth token file: %w", err)
+	}
+
+	token := strings.TrimSpace(string(data))
+	if err := validateProxyAuthToken(token); err != nil {
+		return "", fmt.Errorf("invalid proxy auth token in %s: %w", path, err)
+	}
+	return token, nil
+}
+
+func writeProxyAuthToken(path, token string) error {
+	if err := validateProxyAuthToken(token); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create proxy auth token dir: %w", err)
+	}
+
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write proxy auth token: %s is a symlink", path)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, ".proxy-auth-token-*")
+	if err != nil {
+		return fmt.Errorf("create proxy auth token temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod proxy auth token temp file: %w", err)
+	}
+	if _, err := tmpFile.WriteString(token + "\n"); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("write proxy auth token: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("sync proxy auth token temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close proxy auth token temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename proxy auth token file: %w", err)
+	}
+
+	tmpPath = ""
+	return nil
+}
+
+func validateProxyAuthToken(token string) error {
+	if token == "" {
+		return fmt.Errorf("proxy auth token is empty")
+	}
+
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return fmt.Errorf("proxy auth token is not valid base64url: %w", err)
+	}
+	if len(decoded) != proxyAuthTokenBytes {
+		return fmt.Errorf("proxy auth token entropy size = %d, want %d", len(decoded), proxyAuthTokenBytes)
+	}
+	return nil
 }
 
 func (d *Daemon) sendProxyError(conn net.Conn, message string) {
