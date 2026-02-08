@@ -46,7 +46,7 @@ type ProxyConfig struct {
 	HMACSecretFile        string `yaml:"hmac_secret_file"`        // e.g., "/run/openclaw/auth"
 	PassBinary            string `yaml:"pass_binary"`             // e.g., "/usr/bin/pass"
 	OPBinary              string `yaml:"op_binary"`               // e.g., "/usr/local/bin/op"
-	OPTokenFile           string `yaml:"op_token_file"`            // e.g., "/etc/openclaw/1password.token"
+	OPTokenFile           string `yaml:"op_token_file"`           // e.g., "/etc/openclaw/1password.token"
 	BWBinary              string `yaml:"bw_binary"`               // e.g., "/usr/local/bin/bw"
 	AgeIdentityFile       string `yaml:"age_identity_file"`       // e.g., "/etc/openclaw/age-identity"
 	MaxConnections        int    `yaml:"max_connections"`         // e.g., 64
@@ -58,6 +58,7 @@ type ProxyConfig struct {
 	MaxConnectionLifetime string `yaml:"max_connection_lifetime"` // e.g., "10m" (0 = unlimited)
 	ReplayCacheTTL        string `yaml:"replay_cache_ttl"`        // e.g., "2m"
 	ReplayCacheMax        int    `yaml:"replay_cache_max_entries"`
+	CredentialCacheTTL    string `yaml:"credential_cache_ttl"` // e.g., "30s" (0/empty disables)
 }
 
 // SecurityConfig holds security policy flags.
@@ -719,6 +720,19 @@ func (c *Config) GetReplayCacheMaxEntries() int {
 		return DefaultReplayCacheMaxEntries
 	}
 	return c.Proxy.ReplayCacheMax
+}
+
+// GetCredentialCacheTTL returns credential cache TTL.
+// Returns 0 (disabled) when unset, invalid, or non-positive.
+func (c *Config) GetCredentialCacheTTL() time.Duration {
+	if c.Proxy == nil || c.Proxy.CredentialCacheTTL == "" {
+		return 0
+	}
+	d, err := ParseDuration(c.Proxy.CredentialCacheTTL)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // GetWriteTimeout returns the write deadline for daemon→client responses.

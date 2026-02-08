@@ -59,6 +59,14 @@ func TestWithBWBinary(t *testing.T) {
 	}
 }
 
+func TestWithBypassCache(t *testing.T) {
+	opts := &FetchOptions{}
+	WithBypassCache()(opts)
+	if !opts.BypassCache {
+		t.Error("BypassCache = false, want true")
+	}
+}
+
 func TestFetch_DefaultPassBinary(t *testing.T) {
 	// Verify the default is /usr/bin/pass when no option is provided.
 	options := &FetchOptions{PassBinary: "/usr/bin/pass"}

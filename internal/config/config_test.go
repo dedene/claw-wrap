@@ -631,6 +631,9 @@ func TestGetProxySecurityDefaults(t *testing.T) {
 	if got := cfg.GetReplayCacheMaxEntries(); got != DefaultReplayCacheMaxEntries {
 		t.Errorf("GetReplayCacheMaxEntries() = %d, want %d", got, DefaultReplayCacheMaxEntries)
 	}
+	if got := cfg.GetCredentialCacheTTL(); got != 0 {
+		t.Errorf("GetCredentialCacheTTL() = %v, want 0", got)
+	}
 }
 
 func TestGetReplayCacheTTL_Floor(t *testing.T) {
@@ -654,6 +657,28 @@ func TestGetReplayCacheTTL_Floor(t *testing.T) {
 			}
 			if got := cfg.GetReplayCacheTTL(); got != tt.want {
 				t.Errorf("GetReplayCacheTTL(%q) = %v, want %v", tt.ttl, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetCredentialCacheTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want time.Duration
+	}{
+		{"nil proxy", &Config{}, 0},
+		{"empty value", &Config{Proxy: &ProxyConfig{}}, 0},
+		{"valid", &Config{Proxy: &ProxyConfig{CredentialCacheTTL: "30s"}}, 30 * time.Second},
+		{"invalid", &Config{Proxy: &ProxyConfig{CredentialCacheTTL: "bad"}}, 0},
+		{"zero", &Config{Proxy: &ProxyConfig{CredentialCacheTTL: "0s"}}, 0},
+		{"negative", &Config{Proxy: &ProxyConfig{CredentialCacheTTL: "-5s"}}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetCredentialCacheTTL(); got != tt.want {
+				t.Errorf("GetCredentialCacheTTL() = %v, want %v", got, tt.want)
 			}
 		})
 	}
