@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -268,7 +269,7 @@ func writeMockOPScript(t *testing.T, dir string, output string, exitCode int) st
 	if exitCode == 0 {
 		script = "#!/bin/sh\necho '" + output + "'\n"
 	} else {
-		script = "#!/bin/sh\nexit " + string(rune('0'+exitCode)) + "\n"
+		script = "#!/bin/sh\nexit " + strconv.Itoa(exitCode) + "\n"
 	}
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
 		t.Fatalf("write mock script: %v", err)

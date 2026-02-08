@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"filippo.io/age"
 )
@@ -19,13 +20,25 @@ const (
 )
 
 // ageIdentityFile is set by the config loader; defaults to ageIdentityDefaultPath.
-var ageIdentityFile = ageIdentityDefaultPath
+// Protected by ageIdentityMu for concurrent access.
+var (
+	ageIdentityMu   sync.RWMutex
+	ageIdentityFile = ageIdentityDefaultPath
+)
 
 // SetAgeIdentityFile configures the age identity file path.
 func SetAgeIdentityFile(path string) {
+	ageIdentityMu.Lock()
+	defer ageIdentityMu.Unlock()
 	if path != "" {
 		ageIdentityFile = path
 	}
+}
+
+func getAgeIdentityFile() string {
+	ageIdentityMu.RLock()
+	defer ageIdentityMu.RUnlock()
+	return ageIdentityFile
 }
 
 // fetchFromAge retrieves a credential from an age-encrypted file.
@@ -66,7 +79,7 @@ func getAgeIdentityPath() (string, error) {
 	}
 
 	// 2. Use configured path
-	return ageIdentityFile, nil
+	return getAgeIdentityFile(), nil
 }
 
 // decryptAgeFile decrypts an age-encrypted file using the specified identity.

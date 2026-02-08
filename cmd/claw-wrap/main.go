@@ -287,7 +287,7 @@ func runInstall() error {
 
 func removeInstallTarget(path string, info os.FileInfo) error {
 	if info.IsDir() {
-		return os.RemoveAll(path)
+		return fmt.Errorf("%s exists and is a directory (will not remove)", path)
 	}
 	return os.Remove(path)
 }
@@ -348,6 +348,9 @@ Commands:
   list            List configured tools
   check           Verify all credentials are accessible
   install         Create symlinks for all tools
+                  --install-dir PATH  Install location (default: /usr/local/bin)
+                  --config PATH       Config file path
+                  --force             Replace existing files
 %s  version         Show version
   help            Show this help
 

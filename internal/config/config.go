@@ -369,12 +369,12 @@ func (c *Config) GetPassBinary() string {
 	return paths.DefaultPassBinary()
 }
 
-// GetOPBinary returns the configured 1Password CLI binary path or empty for PATH lookup.
+// GetOPBinary returns the configured 1Password CLI binary path or empty for trusted-directory lookup.
 // If configured, the returned path must be absolute.
 func (c *Config) GetOPBinary() string {
 	if c.Proxy != nil && c.Proxy.OPBinary != "" {
 		if !filepath.IsAbs(c.Proxy.OPBinary) {
-			log.Printf("[WARN] op_binary %q is not absolute, using PATH lookup", c.Proxy.OPBinary)
+			log.Printf("[WARN] op_binary %q is not absolute, using trusted-directory lookup", c.Proxy.OPBinary)
 			return ""
 		}
 		return c.Proxy.OPBinary
@@ -382,12 +382,12 @@ func (c *Config) GetOPBinary() string {
 	return ""
 }
 
-// GetBWBinary returns the configured Bitwarden CLI binary path or empty for PATH lookup.
+// GetBWBinary returns the configured Bitwarden CLI binary path or empty for trusted-directory lookup.
 // If configured, the returned path must be absolute.
 func (c *Config) GetBWBinary() string {
 	if c.Proxy != nil && c.Proxy.BWBinary != "" {
 		if !filepath.IsAbs(c.Proxy.BWBinary) {
-			log.Printf("[WARN] bw_binary %q is not absolute, using PATH lookup", c.Proxy.BWBinary)
+			log.Printf("[WARN] bw_binary %q is not absolute, using trusted-directory lookup", c.Proxy.BWBinary)
 			return ""
 		}
 		return c.Proxy.BWBinary

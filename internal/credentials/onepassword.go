@@ -3,11 +3,13 @@ package credentials
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,13 +23,25 @@ const (
 )
 
 // opTokenFile is set by config loader; defaults to /etc/openclaw/1password.token.
-var opTokenFile = "/etc/openclaw/1password.token"
+// Protected by opTokenMu for concurrent access.
+var (
+	opTokenMu   sync.RWMutex
+	opTokenFile = "/etc/openclaw/1password.token"
+)
 
 // SetOPTokenFile configures the 1Password token file path.
 func SetOPTokenFile(path string) {
+	opTokenMu.Lock()
+	defer opTokenMu.Unlock()
 	if path != "" {
 		opTokenFile = path
 	}
+}
+
+func getOPTokenFile() string {
+	opTokenMu.RLock()
+	defer opTokenMu.RUnlock()
+	return opTokenFile
 }
 
 // opCommandTimeout is the maximum time for 1Password CLI commands.
@@ -147,7 +161,7 @@ func getOPServiceAccountToken() (string, error) {
 	}
 
 	// 2. Check configured file path
-	token, exists, err := readSecureCredentialValue(opTokenFile)
+	token, exists, err := readSecureCredentialValue(getOPTokenFile())
 	if err != nil {
 		return "", fmt.Errorf("invalid 1password token file: %w", err)
 	}
@@ -228,13 +242,12 @@ func readSecureFile(path string) (string, error) {
 	}
 
 	// Read content
-	content := make([]byte, info.Size())
-	n, err := file.Read(content)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
 
-	return strings.TrimSpace(string(content[:n])), nil
+	return strings.TrimSpace(string(content)), nil
 }
 
 // readSecureFileBytes reads a file with security validations, returning raw bytes.
@@ -284,11 +297,10 @@ func readSecureFileBytes(path string) ([]byte, error) {
 	}
 
 	// Read content
-	content := make([]byte, info.Size())
-	n, err := file.Read(content)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	return content[:n], nil
+	return content, nil
 }
