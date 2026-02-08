@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,14 +307,17 @@ tools: {}
 
 func TestDaemon_ReloadConfig_HTTPProxy_EnableDisable(t *testing.T) {
 	tmpDir := t.TempDir()
+	caDir := filepath.Join(tmpDir, "ca")
 	configPath := filepath.Join(tmpDir, "wrappers.yaml")
 
-	enabledConfig := `
+	enabledConfig := fmt.Sprintf(`
 http_proxy:
   enabled: true
   listen: 127.0.0.1:0
+  ca:
+    path: %s
 tools: {}
-`
+`, caDir)
 	if err := os.WriteFile(configPath, []byte(enabledConfig), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -352,6 +356,7 @@ tools: {}
 
 func TestDaemon_ReloadConfig_HTTPProxy_DisableEnable(t *testing.T) {
 	tmpDir := t.TempDir()
+	caDir := filepath.Join(tmpDir, "ca")
 	configPath := filepath.Join(tmpDir, "wrappers.yaml")
 
 	disabledConfig := `
@@ -378,12 +383,14 @@ tools: {}
 		t.Fatal("expected HTTP proxy to be nil when disabled")
 	}
 
-	enabledConfig := `
+	enabledConfig := fmt.Sprintf(`
 http_proxy:
   enabled: true
   listen: 127.0.0.1:0
+  ca:
+    path: %s
 tools: {}
-`
+`, caDir)
 	if err := os.WriteFile(configPath, []byte(enabledConfig), 0o644); err != nil {
 		t.Fatalf("write enabled config: %v", err)
 	}
@@ -398,15 +405,18 @@ tools: {}
 
 func TestDaemon_ReloadConfig_HTTPProxy_EnabledToEnabledReloadsInPlace(t *testing.T) {
 	tmpDir := t.TempDir()
+	caDir := filepath.Join(tmpDir, "ca")
 	configPath := filepath.Join(tmpDir, "wrappers.yaml")
 
-	initialConfig := `
+	initialConfig := fmt.Sprintf(`
 http_proxy:
   enabled: true
   listen: 127.0.0.1:0
   log_level: errors
+  ca:
+    path: %s
 tools: {}
-`
+`, caDir)
 	if err := os.WriteFile(configPath, []byte(initialConfig), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -427,13 +437,15 @@ tools: {}
 	}
 	firstProxy := d.httpProxy
 
-	updatedConfig := `
+	updatedConfig := fmt.Sprintf(`
 http_proxy:
   enabled: true
   listen: 127.0.0.1:0
   log_level: debug
+  ca:
+    path: %s
 tools: {}
-`
+`, caDir)
 	if err := os.WriteFile(configPath, []byte(updatedConfig), 0o644); err != nil {
 		t.Fatalf("write updated config: %v", err)
 	}
@@ -602,14 +614,17 @@ func TestDaemon_EnsureProxyAuthToken_RejectsInvalidToken(t *testing.T) {
 
 func TestDaemon_ReloadConfig_HTTPProxy_EnableDisableEnable_KeepsProxyAuthToken(t *testing.T) {
 	tmpDir := t.TempDir()
+	caDir := filepath.Join(tmpDir, "ca")
 	configPath := filepath.Join(tmpDir, "wrappers.yaml")
 
-	enabledConfig := `
+	enabledConfig := fmt.Sprintf(`
 http_proxy:
   enabled: true
   listen: 127.0.0.1:0
+  ca:
+    path: %s
 tools: {}
-`
+`, caDir)
 	if err := os.WriteFile(configPath, []byte(enabledConfig), 0o644); err != nil {
 		t.Fatalf("write enabled config: %v", err)
 	}
