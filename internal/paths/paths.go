@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // RuntimeDir returns the platform-appropriate runtime directory.
@@ -46,33 +47,56 @@ func RestartHint() string {
 	return "sudo systemctl restart claw-wrap"
 }
 
+// DefaultAgeIdentityFile returns the default age identity file path.
+func DefaultAgeIdentityFile() string {
+	return "/etc/openclaw/age-identity"
+}
+
+// DefaultOPTokenFile returns the default 1Password token file path.
+func DefaultOPTokenFile() string {
+	return "/etc/openclaw/1password.token"
+}
+
 // DefaultPassBinary returns the default pass binary path.
-// On macOS, Homebrew installs to /opt/homebrew/bin; on Linux, /usr/bin.
+// Auto-detect is restricted to trusted install directories.
 func DefaultPassBinary() string {
-	// Prefer PATH lookup for portability.
-	if p, err := lookPath("pass"); err == nil {
+	if p, err := FindTrustedBinary("pass"); err == nil {
 		return p
 	}
+	return defaultPassBinaryForPlatform()
+}
+
+func defaultPassBinaryForPlatform() string {
 	if runtime.GOOS == "darwin" {
 		return "/opt/homebrew/bin/pass"
 	}
 	return "/usr/bin/pass"
 }
 
-// lookPath is a variable so tests can stub it. Defaults to exec.LookPath.
-var lookPath = defaultLookPath
+var trustedBinaryDirs = []string{
+	"/usr/bin",
+	"/usr/local/bin",
+	"/opt/homebrew/bin",
+	"/home/linuxbrew/.linuxbrew/bin",
+}
 
-func defaultLookPath(file string) (string, error) {
-	// Import exec only at call time to avoid init-order issues.
-	// We inline the lookup to keep the package dependency light.
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			dir = "."
-		}
+var statPath = os.Stat
+
+// FindTrustedBinary returns the first executable found in trustedBinaryDirs.
+func FindTrustedBinary(file string) (string, error) {
+	if file == "" {
+		return "", fmt.Errorf("empty binary name")
+	}
+	if strings.Contains(file, "/") {
+		return "", fmt.Errorf("%s: must be a base name", file)
+	}
+
+	for _, dir := range trustedBinaryDirs {
 		path := filepath.Join(dir, file)
-		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+		info, err := statPath(path)
+		if err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("%s: not found in PATH", file)
+	return "", fmt.Errorf("%s: not found in trusted locations", file)
 }

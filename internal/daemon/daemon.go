@@ -53,6 +53,9 @@ type Daemon struct {
 var (
 	resolvePeerExecutableFunc = resolvePeerExecutable
 	resolvePeerArgv0Func      = resolvePeerArgv0
+	setAgeIdentityFileFunc    = credentials.SetAgeIdentityFile
+	setOPTokenFileFunc        = credentials.SetOPTokenFile
+	cleanupBWSessionFunc      = credentials.CleanupBWSession
 )
 
 // Option configures the daemon.
@@ -113,6 +116,9 @@ func (d *Daemon) Run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	log.Printf("[INFO] Loaded %d credentials from config", len(cfg.Credentials))
+	setAgeIdentityFileFunc(cfg.GetAgeIdentityFile())
+	setOPTokenFileFunc(cfg.GetOPTokenFile())
+	defer cleanupBWSessionFunc()
 
 	secret, err := auth.GenerateSecret()
 	if err != nil {
@@ -227,6 +233,10 @@ func (d *Daemon) reloadConfig() error {
 	if err != nil {
 		return err
 	}
+
+	// Configure credential backends
+	setAgeIdentityFileFunc(newCfg.GetAgeIdentityFile())
+	setOPTokenFileFunc(newCfg.GetOPTokenFile())
 
 	d.cfgMu.Lock()
 	d.cfg = newCfg
@@ -404,8 +414,18 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	case "check":
 		resp := protocol.AdminCheckResponse{Credentials: make(map[string]protocol.CredentialInfo), Version: d.version}
 		for name, credDef := range cfg.Credentials {
-			value, err := credentials.Fetch(credDef.Source, credentials.WithPassBinary(cfg.GetPassBinary()))
+			value, err := credentials.Fetch(
+				credDef.Source,
+				credentials.WithPassBinary(cfg.GetPassBinary()),
+				credentials.WithOPBinary(cfg.GetOPBinary()),
+				credentials.WithBWBinary(cfg.GetBWBinary()),
+			)
 			if err != nil || value == "" {
+				if err != nil {
+					log.Printf("[ERROR] credential %q fetch failed: %v", name, err)
+				} else {
+					log.Printf("[ERROR] credential %q returned empty value", name)
+				}
 				resp.Credentials[name] = protocol.CredentialInfo{Status: "failed"}
 			} else {
 				resp.Credentials[name] = protocol.CredentialInfo{Status: "ok", Preview: credentialPreview(value)}

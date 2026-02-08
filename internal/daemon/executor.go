@@ -241,7 +241,12 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("missing credential config: %s", credName)
 		}
-		value, err := credentials.Fetch(credDef.Source, credentials.WithPassBinary(e.cfg.GetPassBinary()))
+		value, err := credentials.Fetch(
+			credDef.Source,
+			credentials.WithPassBinary(e.cfg.GetPassBinary()),
+			credentials.WithOPBinary(e.cfg.GetOPBinary()),
+			credentials.WithBWBinary(e.cfg.GetBWBinary()),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("fetch credential %s: %w", credName, err)
 		}
@@ -315,7 +320,12 @@ func (e *ToolExecutor) setupConfigFile() error {
 		if !ok {
 			return fmt.Errorf("missing credential config: %s", credName)
 		}
-		value, err := credentials.Fetch(credDef.Source, credentials.WithPassBinary(e.cfg.GetPassBinary()))
+		value, err := credentials.Fetch(
+			credDef.Source,
+			credentials.WithPassBinary(e.cfg.GetPassBinary()),
+			credentials.WithOPBinary(e.cfg.GetOPBinary()),
+			credentials.WithBWBinary(e.cfg.GetBWBinary()),
+		)
 		if err != nil {
 			return fmt.Errorf("fetch credential %s: %w", credName, err)
 		}

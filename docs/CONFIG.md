@@ -187,9 +187,17 @@ Individual read/write deadlines may shorten the effective timeout but never exte
 
 ### `pass_binary`
 
-Absolute path to the `pass` binary used for fetching credentials. Default: `/usr/bin/pass`.
+Absolute path to the `pass` binary used for fetching credentials.
 
 Must be an absolute path — relative paths are rejected with a warning and the default is used instead.
+
+If unset, claw-wrap auto-detects `pass` only in trusted directories:
+- `/usr/bin`
+- `/usr/local/bin`
+- `/opt/homebrew/bin`
+- `/home/linuxbrew/.linuxbrew/bin`
+
+If not found there, it falls back to platform default (`/usr/bin/pass` on Linux, `/opt/homebrew/bin/pass` on macOS).
 
 ## Security Settings
 
@@ -232,6 +240,157 @@ Security requirements for `/run/openclaw/env`:
 - Must be a regular file (symlinks are rejected)
 - Must be owned by the daemon user
 - Mode must be `0600` or `0640`
+
+### 1Password (`op://`)
+
+```yaml
+credentials:
+  github-token:
+    source: op://Private/GitHub/token
+
+  # With jq extraction from full item JSON
+  db-password:
+    source: op://Work/Database/item | .fields[] | select(.label=="password") | .value
+```
+
+Uses 1Password CLI (`op`) with [Service Account](https://developer.1password.com/docs/service-accounts/) authentication.
+
+Optional overrides:
+
+```yaml
+proxy:
+  op_binary: /usr/local/bin/op
+  op_token_file: /etc/openclaw/1password.token
+```
+
+If `op_binary` is unset, claw-wrap only auto-detects `op` in trusted directories:
+`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/home/linuxbrew/.linuxbrew/bin`.
+
+**Token sources (checked in order):**
+1. `$CREDENTIALS_DIRECTORY/op-service-account-token` (systemd LoadCredential)
+2. Configured `op_token_file` path (default: `/etc/openclaw/1password.token`)
+3. `OP_SERVICE_ACCOUNT_TOKEN` environment variable
+
+**Security:**
+- Token file must be `0600` or `0640`, no symlinks
+- If a token file exists but fails security checks, claw-wrap fails closed (no env fallback)
+- Token passed via environment variable to `op`, never in command line
+
+### age Encryption
+
+```yaml
+credentials:
+  api-key:
+    source: age:/etc/secrets/api-key.age
+
+  # With jq extraction from encrypted JSON
+  db-creds:
+    source: age:/etc/secrets/database.json.age | .password
+```
+
+Decrypts age-encrypted files using embedded `filippo.io/age` library.
+No `age_binary` setting is supported.
+
+**Identity file sources (checked in order):**
+1. `$CREDENTIALS_DIRECTORY/age-identity` (systemd LoadCredential)
+2. `/etc/openclaw/age-identity` (or configured `age_identity_file`)
+
+**Proxy config option:**
+```yaml
+proxy:
+  age_identity_file: /etc/openclaw/age-identity
+```
+
+**Requirements:**
+- Identity file must be passphrase-free (X25519 or Hybrid)
+- Identity file must be `0600` or `0640`, no symlinks
+- Encrypted files must also have restricted permissions
+
+### macOS Keychain (`keychain:`)
+
+```yaml
+credentials:
+  my-secret:
+    source: keychain:my-service-name
+
+  # With jq extraction from JSON stored in keychain
+  api-config:
+    source: keychain:my-service | .api_key
+```
+
+Reads from macOS login keychain using `security find-generic-password`.
+
+**Setup:**
+```bash
+# 1. Create the keychain item with ACL for claw-wrap
+claw-wrap keychain-setup my-service-name
+# macOS `security` prompts for the secret directly
+
+# 2. Authorize access (required for unattended use)
+claw-wrap check
+# macOS will prompt for your password - click "Always Allow"
+```
+
+After clicking "Always Allow", the daemon can access this credential without prompts. This authorization step is required once per credential after setup.
+
+**Platform:** macOS only. Command hidden on other platforms.
+
+### Bitwarden (`bw:`)
+
+```yaml
+credentials:
+  api-key:
+    source: bw:12345678-uuid-here
+
+  # With jq extraction from item JSON
+  login-password:
+    source: bw:12345678-uuid-here | .login.password
+```
+
+Fetches items from Bitwarden vault using API key authentication.
+
+Optional CLI override:
+
+```yaml
+proxy:
+  bw_binary: /usr/local/bin/bw
+```
+
+If `bw_binary` is unset, claw-wrap only auto-detects `bw` in trusted directories:
+`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/home/linuxbrew/.linuxbrew/bin`.
+
+**Credential sources (each checked in CREDENTIALS_DIRECTORY, then env var):**
+- `bw-client-id` / `BW_CLIENTID`
+- `bw-client-secret` / `BW_CLIENTSECRET`
+- `bw-master-password` / `BW_PASSWORD` (master password for unlock)
+
+**Features:**
+- Session persists until daemon restart (no re-auth per request)
+- Thread-safe with mutex protection
+- Isolated data directory per session
+- Automatic re-authentication on session errors
+
+**Security:**
+- Credentials loaded via `readSecureFile()` (symlink protection, permission checks)
+- If a systemd credential file exists but fails security checks, claw-wrap fails closed (no env fallback)
+- Session token passed via environment variable, not command line
+- Session cleaned up on daemon shutdown
+
+### jq Extraction
+
+All backends support jq extraction using the pipe syntax:
+
+```yaml
+credentials:
+  password:
+    source: bw:item-uuid | .login.password
+
+  nested-field:
+    source: op://vault/item | .fields[] | select(.name=="api_key") | .value
+```
+
+The jq expression is evaluated using embedded `github.com/itchyny/gojq` library with a 5-second timeout.
+For `env:` sources, the value must be valid JSON when jq extraction is used.
 
 ## Tool Options
 

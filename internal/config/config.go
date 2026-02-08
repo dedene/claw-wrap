@@ -45,6 +45,10 @@ type ProxyConfig struct {
 	InlineThreshold       string `yaml:"inline_threshold"`        // e.g., "1MB"
 	HMACSecretFile        string `yaml:"hmac_secret_file"`        // e.g., "/run/openclaw/auth"
 	PassBinary            string `yaml:"pass_binary"`             // e.g., "/usr/bin/pass"
+	OPBinary              string `yaml:"op_binary"`               // e.g., "/usr/local/bin/op"
+	OPTokenFile           string `yaml:"op_token_file"`            // e.g., "/etc/openclaw/1password.token"
+	BWBinary              string `yaml:"bw_binary"`               // e.g., "/usr/local/bin/bw"
+	AgeIdentityFile       string `yaml:"age_identity_file"`       // e.g., "/etc/openclaw/age-identity"
 	MaxConnections        int    `yaml:"max_connections"`         // e.g., 64
 	ReadHeaderTimeout     string `yaml:"read_header_timeout"`     // e.g., "3s"
 	ReadMessageTimeout    string `yaml:"read_message_timeout"`    // e.g., "15s"
@@ -363,6 +367,58 @@ func (c *Config) GetPassBinary() string {
 		return c.Proxy.PassBinary
 	}
 	return paths.DefaultPassBinary()
+}
+
+// GetOPBinary returns the configured 1Password CLI binary path or empty for PATH lookup.
+// If configured, the returned path must be absolute.
+func (c *Config) GetOPBinary() string {
+	if c.Proxy != nil && c.Proxy.OPBinary != "" {
+		if !filepath.IsAbs(c.Proxy.OPBinary) {
+			log.Printf("[WARN] op_binary %q is not absolute, using PATH lookup", c.Proxy.OPBinary)
+			return ""
+		}
+		return c.Proxy.OPBinary
+	}
+	return ""
+}
+
+// GetBWBinary returns the configured Bitwarden CLI binary path or empty for PATH lookup.
+// If configured, the returned path must be absolute.
+func (c *Config) GetBWBinary() string {
+	if c.Proxy != nil && c.Proxy.BWBinary != "" {
+		if !filepath.IsAbs(c.Proxy.BWBinary) {
+			log.Printf("[WARN] bw_binary %q is not absolute, using PATH lookup", c.Proxy.BWBinary)
+			return ""
+		}
+		return c.Proxy.BWBinary
+	}
+	return ""
+}
+
+// GetOPTokenFile returns the configured 1Password token file path or the default.
+// The returned path is always absolute.
+func (c *Config) GetOPTokenFile() string {
+	if c.Proxy != nil && c.Proxy.OPTokenFile != "" {
+		if !filepath.IsAbs(c.Proxy.OPTokenFile) {
+			log.Printf("[WARN] op_token_file %q is not absolute, using default", c.Proxy.OPTokenFile)
+			return paths.DefaultOPTokenFile()
+		}
+		return c.Proxy.OPTokenFile
+	}
+	return paths.DefaultOPTokenFile()
+}
+
+// GetAgeIdentityFile returns the configured age identity file path or the default.
+// The returned path is always absolute.
+func (c *Config) GetAgeIdentityFile() string {
+	if c.Proxy != nil && c.Proxy.AgeIdentityFile != "" {
+		if !filepath.IsAbs(c.Proxy.AgeIdentityFile) {
+			log.Printf("[WARN] age_identity_file %q is not absolute, using default", c.Proxy.AgeIdentityFile)
+			return paths.DefaultAgeIdentityFile()
+		}
+		return c.Proxy.AgeIdentityFile
+	}
+	return paths.DefaultAgeIdentityFile()
 }
 
 // DenyUnverifiedCallerExe returns whether to reject connections when
