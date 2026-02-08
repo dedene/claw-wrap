@@ -144,7 +144,7 @@ This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wr
 
 ```bash
 claw-wrap list      # Should show gh
-claw-wrap check     # Live credential check (bypasses credential_cache_ttl)
+claw-wrap check     # Should show credentials OK (run from host/admin context)
 gh repo list        # Should work — using proxied credentials
 ```
 
@@ -224,7 +224,7 @@ claw-wrap daemon
 
 # Admin commands
 claw-wrap list      # List configured tools
-claw-wrap check     # Verify credentials (always live; bypasses credential_cache_ttl)
+claw-wrap check     # Verify credentials
 claw-wrap install   # Create symlinks (auto-detects directory)
 claw-wrap install --install-dir /usr/local/bin  # Override directory
 claw-wrap version   # Show version
