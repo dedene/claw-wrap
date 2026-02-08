@@ -146,14 +146,13 @@ func (c *credentialCache) startSweeper(interval time.Duration) {
 		return
 	}
 
-	stopCh := make(chan struct{})
-	doneCh := make(chan struct{})
-
 	c.mu.Lock()
 	if c.ttl <= 0 || c.sweeperStop != nil {
 		c.mu.Unlock()
 		return
 	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
 	c.sweeperStop = stopCh
 	c.sweeperDone = doneCh
 	c.sweeperInterval = interval

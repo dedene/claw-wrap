@@ -150,7 +150,8 @@ func Fetch(source string, opts ...FetchOption) (string, error) {
 	}
 
 	if cacheEligible && result != "" {
-		credentialResultCache.Set(cacheKey, result, now)
+		insertNow := credentialCacheNow()
+		credentialResultCache.Set(cacheKey, result, insertNow)
 	}
 	return result, nil
 }
