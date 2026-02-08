@@ -17,6 +17,7 @@ proxy:
   max_stdin_message_size: 1MB
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
+  credential_cache_ttl: 0s
   write_timeout: 30s
   max_output_size: 100MB
   max_connection_lifetime: 30m
@@ -50,6 +51,7 @@ proxy:
   max_stdin_message_size: 1MB              # Max wrapper->daemon NDJSON message
   replay_cache_ttl: 2m                     # Replay protection cache TTL
   replay_cache_max_entries: 10000          # Replay cache size bound
+  credential_cache_ttl: 0s                 # Credential cache TTL (0 disables)
   write_timeout: 30s                       # Write deadline per response message
   max_output_size: 100MB                   # Kill tool if output exceeds this
   max_connection_lifetime: 30m             # Hard cap on connection duration
@@ -127,6 +129,7 @@ proxy:
   max_stdin_message_size: 1MB               # Max stdin/control message size
   replay_cache_ttl: 2m                      # Replay detection TTL
   replay_cache_max_entries: 10000           # Replay cache size cap
+  credential_cache_ttl: 0s                  # Credential fetch cache TTL (0 disables)
   write_timeout: 30s                        # Write deadline per response message
   max_output_size: 100MB                    # Kill tool if output exceeds this
   max_connection_lifetime: 30m              # Hard cap on connection duration
@@ -168,6 +171,17 @@ Maximum size of wrapper-to-daemon NDJSON messages (`stdin`, `signal`, `cleanup`)
 Controls replay protection for authenticated requests. Reuse of the same signed request within TTL is rejected.
 
 Note: the TTL has a floor of 10 seconds — values below 10s are clamped.
+
+### `credential_cache_ttl`
+
+Optional in-memory TTL cache for credential fetch results.
+
+- Default: `0` (disabled)
+- Format: Go duration (`30s`, `2m`, `1h`)
+- Scope: only `op://` (1Password) and `bw:` (Bitwarden) credential sources
+- `claw-wrap check` always bypasses this cache and fetches credentials live
+
+Use this to reduce repeated upstream secret-store latency for frequently-invoked tools.
 
 ### `write_timeout`
 

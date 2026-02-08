@@ -55,6 +55,8 @@ var (
 	resolvePeerArgv0Func      = resolvePeerArgv0
 	setAgeIdentityFileFunc    = credentials.SetAgeIdentityFile
 	setOPTokenFileFunc        = credentials.SetOPTokenFile
+	setCredentialCacheTTLFunc = credentials.SetCredentialCacheTTL
+	fetchCredentialFunc       = credentials.Fetch
 	cleanupBWSessionFunc      = credentials.CleanupBWSession
 )
 
@@ -118,6 +120,7 @@ func (d *Daemon) Run() error {
 	log.Printf("[INFO] Loaded %d credentials from config", len(cfg.Credentials))
 	setAgeIdentityFileFunc(cfg.GetAgeIdentityFile())
 	setOPTokenFileFunc(cfg.GetOPTokenFile())
+	setCredentialCacheTTLFunc(cfg.GetCredentialCacheTTL())
 	defer cleanupBWSessionFunc()
 
 	secret, err := auth.GenerateSecret()
@@ -237,6 +240,7 @@ func (d *Daemon) reloadConfig() error {
 	// Configure credential backends
 	setAgeIdentityFileFunc(newCfg.GetAgeIdentityFile())
 	setOPTokenFileFunc(newCfg.GetOPTokenFile())
+	setCredentialCacheTTLFunc(newCfg.GetCredentialCacheTTL())
 
 	d.cfgMu.Lock()
 	d.cfg = newCfg
@@ -414,11 +418,12 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	case "check":
 		resp := protocol.AdminCheckResponse{Credentials: make(map[string]protocol.CredentialInfo), Version: d.version}
 		for name, credDef := range cfg.Credentials {
-			value, err := credentials.Fetch(
+			value, err := fetchCredentialFunc(
 				credDef.Source,
 				credentials.WithPassBinary(cfg.GetPassBinary()),
 				credentials.WithOPBinary(cfg.GetOPBinary()),
 				credentials.WithBWBinary(cfg.GetBWBinary()),
+				credentials.WithBypassCache(),
 			)
 			if err != nil || value == "" {
 				if err != nil {

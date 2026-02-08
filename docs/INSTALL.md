@@ -65,6 +65,7 @@ proxy:
   max_stdin_message_size: 1MB
   replay_cache_ttl: 2m
   replay_cache_max_entries: 10000
+  credential_cache_ttl: 0s
   max_output_size: 100MB
   max_connection_lifetime: 30m
 
@@ -137,6 +138,7 @@ claw-wrap list
 # Check credentials are accessible
 # Run from host/admin context (outside sandbox).
 # In strict firejail, this may fail by design.
+# This check bypasses credential_cache_ttl and always fetches live.
 claw-wrap check
 
 # Test gh through claw-wrap
