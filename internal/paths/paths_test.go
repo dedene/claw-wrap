@@ -3,6 +3,8 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +69,39 @@ func TestDefaultPassBinary_UsesTrustedLookup(t *testing.T) {
 
 	if got := DefaultPassBinary(); got != binaryPath {
 		t.Fatalf("DefaultPassBinary() = %q, want %q", got, binaryPath)
+	}
+}
+
+func TestCADir_PlatformSpecific(t *testing.T) {
+	got := CADir()
+
+	switch runtime.GOOS {
+	case "darwin":
+		// macOS should use ~/.claw-wrap/ca; if HOME unavailable, fallback to /tmp/claw-wrap/ca
+		home, err := os.UserHomeDir()
+		var want string
+		if err != nil {
+			want = "/tmp/claw-wrap/ca"
+		} else {
+			want = filepath.Join(home, ".claw-wrap", "ca")
+		}
+		if got != want {
+			t.Errorf("CADir() = %q, want %q", got, want)
+		}
+	case "linux":
+		// Linux should use /etc/openclaw/ca
+		if got != "/etc/openclaw/ca" {
+			t.Errorf("CADir() = %q, want /etc/openclaw/ca", got)
+		}
+	default:
+		// Other platforms - just verify it returns a non-empty path
+		if got == "" {
+			t.Error("CADir() returned empty string")
+		}
+	}
+
+	// Path should not contain ~ (unexpanded)
+	if strings.Contains(got, "~") {
+		t.Errorf("CADir() = %q, contains unexpanded ~", got)
 	}
 }

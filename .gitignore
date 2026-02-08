@@ -2,6 +2,7 @@
 /build/
 /dist/
 *.exe
+/claw-wrap
 
 # IDE
 .idea/

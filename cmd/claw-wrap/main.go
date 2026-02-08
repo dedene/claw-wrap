@@ -167,6 +167,26 @@ func runCheck() error {
 	if !allOk {
 		return fmt.Errorf("some credentials failed")
 	}
+
+	// Show HTTP proxy info if enabled
+	if resp.HTTPProxy != nil && resp.HTTPProxy.Enabled {
+		fmt.Println()
+		fmt.Println("HTTP Proxy:")
+		fmt.Printf("  Listen:     %s\n", resp.HTTPProxy.Listen)
+		fmt.Printf("  CA cert:    %s\n", resp.HTTPProxy.CACertPath)
+		if resp.HTTPProxy.AuthTokenPath != "" {
+			fmt.Printf("  Auth token: %s\n", resp.HTTPProxy.AuthTokenPath)
+		}
+		fmt.Println()
+		fmt.Println("Usage:")
+		if resp.HTTPProxy.AuthTokenPath != "" {
+			fmt.Printf("  export HTTPS_PROXY=\"http://claw:$(cat %s)@%s\"\n", resp.HTTPProxy.AuthTokenPath, resp.HTTPProxy.Listen)
+		} else {
+			fmt.Printf("  export HTTPS_PROXY=\"http://%s\"\n", resp.HTTPProxy.Listen)
+		}
+		fmt.Printf("  export SSL_CERT_FILE=\"%s\"\n", resp.HTTPProxy.CACertPath)
+	}
+
 	return nil
 }
 

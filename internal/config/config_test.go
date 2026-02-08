@@ -772,3 +772,450 @@ func TestGetMaxConnectionLifetime(t *testing.T) {
 		})
 	}
 }
+
+// HTTP Proxy Config Tests
+
+func TestValidate_HTTPProxy_ValidConfig(t *testing.T) {
+	cfg := &Config{
+		Credentials: map[string]CredentialDef{
+			"github-token": {Source: "op://vault/item/token"},
+		},
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled:  true,
+			Listen:   "127.0.0.1:8080",
+			LogLevel: "info",
+			CA: CAConfig{
+				Path:         "/tmp/ca",
+				ValidityDays: 365,
+				Organization: "test",
+			},
+			Routes: []ProxyRoute{
+				{
+					Host: "api.github.com",
+					Inject: InjectSpec{
+						Header: "Authorization",
+						Value:  "Bearer {{github-token}}",
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	// Verify host regex was compiled
+	if cfg.HTTPProxy.Routes[0].HostRegex == nil {
+		t.Error("HostRegex not compiled")
+	}
+}
+
+func TestValidate_HTTPProxy_UnknownCredential(t *testing.T) {
+	cfg := &Config{
+		Credentials: map[string]CredentialDef{
+			"known": {Source: "env:KNOWN"},
+		},
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "api.example.com",
+					Inject: InjectSpec{Header: "X-Test", Value: "Bearer {{unknown}}"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject unknown credential")
+	}
+	if !strings.Contains(err.Error(), "unknown credential") {
+		t.Errorf("error = %v, want unknown credential error", err)
+	}
+}
+
+func TestValidate_HTTPProxy_DisabledSkipsValidation(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: false,
+			Routes: []ProxyRoute{
+				{Host: ""}, // Invalid but should be skipped
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() should skip disabled proxy: %v", err)
+	}
+}
+
+func TestValidate_HTTPProxy_InvalidLogLevel(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled:  true,
+			LogLevel: "verbose", // invalid
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject invalid log_level")
+	}
+	if !strings.Contains(err.Error(), "log_level") {
+		t.Errorf("error = %v, want log_level error", err)
+	}
+}
+
+func TestValidate_HTTPProxy_ValidLogLevels(t *testing.T) {
+	levels := []string{"", "none", "errors", "info", "debug"}
+	for _, level := range levels {
+		t.Run(level, func(t *testing.T) {
+			cfg := &Config{
+				HTTPProxy: &HTTPProxyConfig{
+					Enabled:  true,
+					LogLevel: level,
+					Routes: []ProxyRoute{
+						{
+							Host:   "example.com",
+							Inject: InjectSpec{Header: "X-Test", Value: "test"},
+						},
+					},
+				},
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() error for log_level %q: %v", level, err)
+			}
+		})
+	}
+}
+
+func TestValidate_HTTPProxy_EmptyRouteHost(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "",
+					Inject: InjectSpec{Header: "X-Test", Value: "test"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject empty host")
+	}
+	if !strings.Contains(err.Error(), "host is required") {
+		t.Errorf("error = %v, want host required error", err)
+	}
+}
+
+func TestValidate_HTTPProxy_EmptyInjectHeader(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "example.com",
+					Inject: InjectSpec{Header: "", Value: "test"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject empty inject.header")
+	}
+	if !strings.Contains(err.Error(), "inject.header is required") {
+		t.Errorf("error = %v, want inject.header required error", err)
+	}
+}
+
+func TestValidate_HTTPProxy_EmptyInjectValue(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "example.com",
+					Inject: InjectSpec{Header: "X-Test", Value: ""},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject empty inject.value")
+	}
+	if !strings.Contains(err.Error(), "inject.value is required") {
+		t.Errorf("error = %v, want inject.value required error", err)
+	}
+}
+
+func TestCompileHostPattern(t *testing.T) {
+	tests := []struct {
+		pattern string
+		host    string
+		want    bool
+	}{
+		// Exact matches
+		{"api.github.com", "api.github.com", true},
+		{"api.github.com", "other.github.com", false},
+		{"api.github.com", "api.github.com.evil.com", false},
+
+		// Wildcard matches (suffix-anchored)
+		{"*.github.com", "api.github.com", true},
+		{"*.github.com", "raw.github.com", true},
+		{"*.github.com", "github.com", false},              // bare domain doesn't match *.
+		{"*.github.com", "evil.github.com.attacker.com", false}, // suffix-anchored
+
+		// Wildcard with subdomain attack prevention
+		{"*.example.com", "sub.example.com", true},
+		{"*.example.com", "deep.sub.example.com", false}, // only one level
+		{"*.example.com", "example.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_"+tt.host, func(t *testing.T) {
+			re, err := compileHostPattern(tt.pattern)
+			if err != nil {
+				t.Fatalf("compileHostPattern(%q) error = %v", tt.pattern, err)
+			}
+			got := re.MatchString(tt.host)
+			if got != tt.want {
+				t.Errorf("pattern %q match %q = %v, want %v", tt.pattern, tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompileHostPattern_Empty(t *testing.T) {
+	_, err := compileHostPattern("")
+	if err == nil {
+		t.Error("compileHostPattern(\"\") should return error")
+	}
+}
+
+func TestCompileHostPattern_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		pattern string
+		host    string
+		want    bool
+	}{
+		// Case-insensitive exact match (pattern has uppercase)
+		{"API.GitHub.COM", "api.github.com", true},
+		{"api.github.com", "API.GITHUB.COM", false}, // host not normalized here, test pattern normalization
+
+		// Case-insensitive wildcard (pattern has uppercase)
+		{"*.Example.COM", "sub.example.com", true},
+		{"*.GITHUB.COM", "api.github.com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_"+tt.host, func(t *testing.T) {
+			re, err := compileHostPattern(tt.pattern)
+			if err != nil {
+				t.Fatalf("compileHostPattern(%q) error = %v", tt.pattern, err)
+			}
+			got := re.MatchString(tt.host)
+			if got != tt.want {
+				t.Errorf("pattern %q match %q = %v, want %v", tt.pattern, tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompileHostPattern_InvalidWildcard(t *testing.T) {
+	// "*." is invalid (empty suffix)
+	_, err := compileHostPattern("*.")
+	if err == nil {
+		t.Error("compileHostPattern(\"*.\") should return error for empty suffix")
+	}
+}
+
+func TestCompileHostPattern_TrailingDot(t *testing.T) {
+	// Trailing dot should be normalized away (FQDN)
+	re, err := compileHostPattern("example.com.")
+	if err != nil {
+		t.Fatalf("compileHostPattern(\"example.com.\") error = %v", err)
+	}
+	if !re.MatchString("example.com") {
+		t.Error("pattern with trailing dot should match normalized host")
+	}
+}
+
+func TestCompilePathRule(t *testing.T) {
+	tests := []struct {
+		pattern string
+		method  string
+		path    string
+		want    bool
+	}{
+		// Path only (any method)
+		{"/api/**", "GET", "/api/users/123", true},
+		{"/api/**", "POST", "/api/users", true},
+		{"/api/**", "GET", "/other", false},
+
+		// Method + path
+		{"GET /api/users", "GET", "/api/users", true},
+		{"GET /api/users", "POST", "/api/users", false},
+		{"POST /api/*", "POST", "/api/users", true},
+		{"POST /api/*", "POST", "/api/users/123", false}, // * is single segment
+
+		// Wildcards
+		{"/users/*/profile", "GET", "/users/123/profile", true},
+		{"/users/*/profile", "GET", "/users/abc/profile", true},
+		{"/users/*/profile", "GET", "/users/123/settings", false},
+
+		// Double wildcard
+		{"/files/**", "GET", "/files/a/b/c/d.txt", true},
+		{"DELETE /admin/**", "DELETE", "/admin/users/123", true},
+		{"DELETE /admin/**", "GET", "/admin/users/123", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_"+tt.method+"_"+tt.path, func(t *testing.T) {
+			rule, err := compilePathRule(tt.pattern)
+			if err != nil {
+				t.Fatalf("compilePathRule(%q) error = %v", tt.pattern, err)
+			}
+
+			methodMatch := rule.Method == "*" || rule.Method == tt.method
+			pathMatch := rule.Pattern.MatchString(tt.path)
+			got := methodMatch && pathMatch
+
+			if got != tt.want {
+				t.Errorf("rule %q: method=%s path=%s = %v, want %v (methodMatch=%v, pathMatch=%v)",
+					tt.pattern, tt.method, tt.path, got, tt.want, methodMatch, pathMatch)
+			}
+		})
+	}
+}
+
+func TestCompilePathRule_InvalidMethod(t *testing.T) {
+	_, err := compilePathRule("INVALID /path")
+	if err == nil {
+		t.Error("compilePathRule with invalid method should return error")
+	}
+	if !strings.Contains(err.Error(), "invalid method") {
+		t.Errorf("error = %v, want invalid method error", err)
+	}
+}
+
+func TestCompilePathRule_Empty(t *testing.T) {
+	_, err := compilePathRule("")
+	if err == nil {
+		t.Error("compilePathRule(\"\") should return error")
+	}
+}
+
+func TestValidate_HTTPProxy_AllowDenyRules(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "api.example.com",
+					Inject: InjectSpec{Header: "Authorization", Value: "Bearer token"},
+					Allow:  []string{"GET /api/**", "POST /api/users"},
+					Deny:   []string{"DELETE /**"},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	route := cfg.HTTPProxy.Routes[0]
+	if len(route.AllowRules) != 2 {
+		t.Errorf("AllowRules count = %d, want 2", len(route.AllowRules))
+	}
+	if len(route.DenyRules) != 1 {
+		t.Errorf("DenyRules count = %d, want 1", len(route.DenyRules))
+	}
+}
+
+func TestValidate_HTTPProxy_InvalidAllowRule(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "api.example.com",
+					Inject: InjectSpec{Header: "X-Test", Value: "test"},
+					Allow:  []string{"BADMETHOD /path"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject invalid allow rule")
+	}
+	if !strings.Contains(err.Error(), "allow[0]") {
+		t.Errorf("error = %v, want allow[0] error", err)
+	}
+}
+
+func TestValidate_HTTPProxy_InvalidDenyRule(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			Enabled: true,
+			Routes: []ProxyRoute{
+				{
+					Host:   "api.example.com",
+					Inject: InjectSpec{Header: "X-Test", Value: "test"},
+					Deny:   []string{""},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject empty deny rule")
+	}
+	if !strings.Contains(err.Error(), "deny[0]") {
+		t.Errorf("error = %v, want deny[0] error", err)
+	}
+}
+
+func TestGetHTTPProxyConfig(t *testing.T) {
+	t.Run("nil returns nil", func(t *testing.T) {
+		cfg := &Config{}
+		if got := cfg.GetHTTPProxyConfig(); got != nil {
+			t.Errorf("GetHTTPProxyConfig() = %v, want nil", got)
+		}
+	})
+
+	t.Run("returns config", func(t *testing.T) {
+		httpCfg := &HTTPProxyConfig{Enabled: true}
+		cfg := &Config{HTTPProxy: httpCfg}
+		if got := cfg.GetHTTPProxyConfig(); got != httpCfg {
+			t.Errorf("GetHTTPProxyConfig() = %v, want %v", got, httpCfg)
+		}
+	})
+}
+
+func TestHTTPProxyConfig_GetRequireAuth(t *testing.T) {
+	t.Run("nil defaults to true", func(t *testing.T) {
+		cfg := &HTTPProxyConfig{}
+		if got := cfg.GetRequireAuth(); !got {
+			t.Error("GetRequireAuth() = false, want true (default)")
+		}
+	})
+
+	t.Run("explicit true", func(t *testing.T) {
+		v := true
+		cfg := &HTTPProxyConfig{RequireAuth: &v}
+		if got := cfg.GetRequireAuth(); !got {
+			t.Error("GetRequireAuth() = false, want true")
+		}
+	})
+
+	t.Run("explicit false", func(t *testing.T) {
+		v := false
+		cfg := &HTTPProxyConfig{RequireAuth: &v}
+		if got := cfg.GetRequireAuth(); got {
+			t.Error("GetRequireAuth() = true, want false")
+		}
+	})
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -21,6 +22,7 @@ import (
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
 	"claw-wrap/internal/framing"
+	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
 )
 
@@ -131,30 +133,38 @@ type ToolExecutor struct {
 	stderrBuf *OutputBuffer
 
 	pumperWg sync.WaitGroup // WaitGroup for I/O pumpers
+
+	proxyAuthToken string
 }
 
 // NewToolExecutor creates a new ToolExecutor for the given request.
-func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.ToolDef, cfg *config.Config) *ToolExecutor {
+func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.ToolDef, cfg *config.Config, proxyAuthToken string) (*ToolExecutor, error) {
+	// Validate proxy auth token for tools that require proxy (only when auth is required)
+	if tool.UseProxy && cfg.GetHTTPProxyEnabled() && cfg.GetHTTPProxyRequireAuth() && proxyAuthToken == "" {
+		return nil, fmt.Errorf("proxy auth token required for tool %q with use_proxy enabled", req.Tool)
+	}
+
 	timeout := tool.GetTimeout(cfg.GetTimeout())
 	threshold := cfg.GetInlineThreshold()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	return &ToolExecutor{
-		conn:      conn,
-		req:       req,
-		tool:      tool,
-		cfg:       cfg,
-		ctx:       ctx,
-		cancel:    cancel,
-		timeout:   timeout,
-		threshold: threshold,
-		maxOutSz:  cfg.GetMaxOutputSize(),
-		readMsgTO: cfg.GetReadMessageTimeout(),
-		writeTO:   cfg.GetWriteTimeout(),
-		msgSize:   cfg.GetMaxStdinMessageSize(),
-		encoder:   framing.NewEncoder(conn),
-	}
+		conn:           conn,
+		req:            req,
+		tool:           tool,
+		cfg:            cfg,
+		ctx:            ctx,
+		cancel:         cancel,
+		timeout:        timeout,
+		threshold:      threshold,
+		maxOutSz:       cfg.GetMaxOutputSize(),
+		readMsgTO:      cfg.GetReadMessageTimeout(),
+		writeTO:        cfg.GetWriteTimeout(),
+		msgSize:        cfg.GetMaxStdinMessageSize(),
+		encoder:        framing.NewEncoder(conn),
+		proxyAuthToken: proxyAuthToken,
+	}, nil
 }
 
 // Run is the main entry point that executes the tool and handles I/O.
@@ -281,6 +291,39 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		envMap["XDG_CONFIG_HOME"] = e.configDir
 	}
 
+	// Inject HTTP proxy env vars if tool opts in
+	if e.tool.UseProxy && e.cfg.GetHTTPProxyEnabled() {
+		var proxyURL string
+		if e.cfg.GetHTTPProxyRequireAuth() {
+			var err error
+			proxyURL, err = buildAuthenticatedProxyURL(e.cfg.GetHTTPProxyListen(), e.proxyAuthToken)
+			if err != nil {
+				return nil, fmt.Errorf("build proxy URL: %w", err)
+			}
+		} else {
+			// No auth required - use simple URL without credentials
+			proxyURL = "http://" + e.cfg.GetHTTPProxyListen()
+		}
+		envMap["HTTP_PROXY"] = proxyURL
+		envMap["HTTPS_PROXY"] = proxyURL
+		envMap["http_proxy"] = proxyURL
+		envMap["https_proxy"] = proxyURL
+
+		// Inject CA cert paths for various clients
+		// Fallback to platform default if not configured
+		caPath := e.cfg.GetHTTPProxyCAPath()
+		if caPath == "" {
+			caPath = paths.CADir()
+		}
+		certFile := filepath.Join(caPath, "ca.crt")
+		envMap["SSL_CERT_FILE"] = certFile
+		envMap["NODE_EXTRA_CA_CERTS"] = certFile
+		envMap["REQUESTS_CA_BUNDLE"] = certFile
+		envMap["CURL_CA_BUNDLE"] = certFile
+
+		log.Printf("[DEBUG] Injected proxy env vars for tool %s", e.req.Tool)
+	}
+
 	// Convert map to slice
 	env := make([]string, 0, len(envMap))
 	for k, v := range envMap {
@@ -288,6 +331,21 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 	}
 
 	return env, nil
+}
+
+func buildAuthenticatedProxyURL(listenAddr string, token string) (string, error) {
+	if strings.TrimSpace(listenAddr) == "" {
+		return "", fmt.Errorf("missing proxy listen address")
+	}
+	if token == "" {
+		return "", fmt.Errorf("missing proxy auth token")
+	}
+
+	return (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword("claw", token),
+		Host:   listenAddr,
+	}).String(), nil
 }
 
 // setupConfigFile creates a temp config file if the tool requires one.

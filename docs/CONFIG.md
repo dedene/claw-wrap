@@ -2,6 +2,17 @@
 
 claw-wrap reads its configuration from `/etc/openclaw/wrappers.yaml`.
 
+## Platform-Specific Paths
+
+The runtime directory varies by platform:
+
+| Platform | Runtime Directory | Example Paths |
+|----------|-------------------|---------------|
+| Linux    | `/run/openclaw/`  | `/run/openclaw/auth`, `/run/openclaw/proxy-auth-token` |
+| macOS    | `$TMPDIR/openclaw/` | `/var/folders/.../openclaw/auth` |
+
+Examples in this document use Linux paths. On macOS, substitute `$TMPDIR/openclaw/` for `/run/openclaw/`.
+
 ## Minimal Example
 
 A single tool (`gh`) with one credential:
@@ -212,6 +223,205 @@ If unset, claw-wrap auto-detects `pass` only in trusted directories:
 - `/home/linuxbrew/.linuxbrew/bin`
 
 If not found there, it falls back to platform default (`/usr/bin/pass` on Linux, `/opt/homebrew/bin/pass` on macOS).
+
+## HTTP Proxy Settings
+
+The optional `http_proxy:` section enables a MITM HTTP/HTTPS proxy for credential injection. This allows tools to make authenticated API calls through the proxy without explicit credential configuration.
+
+Routes reference credentials by name from the `credentials:` section using `{{credential-name}}` syntax.
+
+```yaml
+credentials:
+  github-token:
+    source: op://vault/github/token
+  openai-key:
+    source: env:OPENAI_KEY
+
+http_proxy:
+  enabled: true
+  listen: 127.0.0.1:8080
+  log_level: errors                    # none, errors, info, debug
+  ca:
+    # path: ~/.claw-wrap/ca            # Omit to use platform default
+    validity_days: 365                 # CA validity period
+    organization: claw-wrap            # CA organization name
+  strip_response_headers:              # Headers to remove from responses
+    - Server
+    - X-Powered-By
+  routes:
+    - host: api.github.com
+      inject:
+        header: Authorization
+        value: "Bearer {{github-token}}"  # References credentials.github-token
+      allow:
+        - GET /**
+        - POST /repos/*/issues
+      deny:
+        - DELETE /**
+
+    - host: "*.openai.com"             # Wildcard subdomain matching
+      inject:
+        header: Authorization
+        value: "Bearer {{openai-key}}"    # References credentials.openai-key
+```
+
+### `enabled`
+
+Enable/disable the HTTP proxy. Default: `false`.
+
+### `listen`
+
+Address to listen on. Must be localhost (`127.0.0.1`, `::1`, or `localhost`). Default: `127.0.0.1:8080`.
+
+### `require_auth`
+
+Whether proxy authentication is required. Default: `true`.
+
+Set to `false` for single-user localhost setups where any local process should be able to use the proxy without authentication. When disabled, no proxy auth token is generated and clients can connect without credentials.
+
+```yaml
+http_proxy:
+  enabled: true
+  require_auth: false  # Skip proxy auth for localhost
+```
+
+### `log_level`
+
+Log verbosity: `none`, `errors` (default), `info`, `debug`.
+
+### `ca`
+
+CA certificate configuration for MITM TLS termination:
+
+- `path`: Directory for CA cert/key storage (default: `~/.claw-wrap/ca` on macOS, `/etc/openclaw/ca` on Linux)
+- `validity_days`: Certificate validity period (default: 365)
+- `organization`: CA organization name in certificate
+
+The CA cert is auto-generated on first start and auto-rotated 30 days before expiry.
+
+### `strip_response_headers`
+
+List of response headers to remove before returning to client. Useful for stripping server fingerprints.
+
+### `routes`
+
+List of route definitions for credential injection:
+
+#### Route fields
+
+- `host`: Host pattern (exact or `*.suffix` wildcard)
+- `inject.header`: HTTP header name to inject
+- `inject.value`: Header value with optional `{{...}}` credential references
+- `allow`: Optional list of allowed method/path patterns
+- `deny`: Optional list of denied method/path patterns
+
+#### Host matching
+
+- Exact: `api.github.com` matches only `api.github.com`
+- Wildcard: `*.github.com` matches `api.github.com`, `raw.github.com` but NOT:
+  - `github.com` (bare domain)
+  - `deep.sub.github.com` (multi-level subdomain)
+  - `evil.github.com.attacker.com` (suffix-anchored, prevents attacks)
+
+#### Path patterns
+
+Format: `[METHOD] /path/pattern`
+
+- `*` matches single path segment
+- `**` matches rest of path
+- Method is optional, defaults to `*` (any)
+
+Examples:
+- `GET /api/**` - GET requests to any path under /api/
+- `POST /users` - POST to exactly /users
+- `/files/*` - Any method to /files/{segment}
+
+#### Allow/Deny evaluation
+
+1. Check deny rules first (any match → deny)
+2. If allow rules exist, at least one must match
+3. If no rules, default permit
+
+Requests not matching any route pass through to the upstream server without credential injection.
+
+### Tool integration with `use_proxy`
+
+Tools can opt into using the HTTP proxy:
+
+```yaml
+tools:
+  my-api-tool:
+    binary: /usr/bin/my-tool
+    use_proxy: true
+```
+
+When `use_proxy: true`, the daemon injects these env vars:
+- `HTTP_PROXY` / `http_proxy` (with proxy auth credentials)
+- `HTTPS_PROXY` / `https_proxy` (with proxy auth credentials)
+- `SSL_CERT_FILE` (for CA trust)
+- `NODE_EXTRA_CA_CERTS`
+- `REQUESTS_CA_BUNDLE`
+- `CURL_CA_BUNDLE`
+
+The proxy requires authentication for all requests (HTTP and CONNECT). For `use_proxy: true`, credentials are injected automatically by claw-wrap.
+
+Manual clients must authenticate to the proxy using Basic auth credentials in the proxy URL.
+
+Run `claw-wrap check` to see the exact paths and export commands for your system:
+
+```bash
+claw-wrap check
+# Shows:
+#   HTTP Proxy:
+#     Listen:     127.0.0.1:8080
+#     CA cert:    /path/to/ca.crt
+#     Auth token: /path/to/proxy-auth-token
+#
+#   Usage:
+#     export HTTPS_PROXY="http://claw:$(cat /path/to/proxy-auth-token)@127.0.0.1:8080"
+#     export SSL_CERT_FILE="/path/to/ca.crt"
+```
+
+`<daemon-generated-token>` is stored in the daemon runtime directory (see [Platform-Specific Paths](#platform-specific-paths)) as `proxy-auth-token` with strict file permissions (0600) and reused across daemon restarts (but regenerates on system reboot since runtime directory is cleared).
+If you are not using `use_proxy`, you must provide your own integration to supply this token.
+Deleting the token file and restarting the daemon forces token regeneration.
+
+### Credential references
+
+Inject values use `{{name}}` syntax to reference credentials defined in the `credentials:` section:
+
+```yaml
+credentials:
+  api-token:
+    source: op://vault/item/token
+  api-key:
+    source: env:API_KEY
+  pass-token:
+    source: pass:api/token
+
+http_proxy:
+  routes:
+    - host: api.example.com
+      inject:
+        header: Authorization
+        value: "Bearer {{api-token}}"   # References credentials.api-token
+```
+
+Named credentials provide:
+- **Single source of truth** - credentials defined once, referenced anywhere
+- **Validation** - unknown credential names caught at config load time
+- **Reusability** - same credential used in multiple routes
+
+### Security considerations
+
+1. **Authenticated proxy** - Every request requires proxy auth (HTTP + CONNECT)
+2. **Localhost only** - Proxy binds to 127.0.0.1 only, never exposed externally
+3. **SSRF protection** - Requests to private/reserved IP ranges are blocked
+4. **Request smuggling checks** - Transfer-Encoding + Content-Length combos are rejected
+5. **Host mismatch protection** - Host header mismatch vs canonical target is rejected
+6. **CA key security** - Private key stored with 0600 permissions
+7. **Wildcard safety** - Host wildcards are suffix-anchored to prevent subdomain attacks
+8. **Firejail integration** (Linux) - Sandboxed tools need CA access: add `whitelist /etc/openclaw/ca/ca.crt` to firejail profiles
 
 ## Security Settings
 
