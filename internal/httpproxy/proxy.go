@@ -39,6 +39,7 @@ type Proxy struct {
 	// For graceful shutdown
 	shutdownCh chan struct{}
 	wg         sync.WaitGroup
+	stopOnce   sync.Once
 }
 
 // Option configures the proxy.
@@ -195,19 +196,22 @@ func (p *Proxy) CAPath() string {
 	return p.ca.CertPath()
 }
 
-// Stop gracefully shuts down the proxy.
+// Stop gracefully shuts down the proxy. Safe to call multiple times.
 func (p *Proxy) Stop() error {
-	close(p.shutdownCh)
+	var err error
+	p.stopOnce.Do(func() {
+		close(p.shutdownCh)
 
-	if p.listener != nil {
-		if err := p.listener.Close(); err != nil {
-			return fmt.Errorf("close listener: %w", err)
+		if p.listener != nil {
+			if closeErr := p.listener.Close(); closeErr != nil {
+				err = fmt.Errorf("close listener: %w", closeErr)
+			}
 		}
-	}
 
-	p.wg.Wait()
-	log.Printf("[INFO] HTTP proxy stopped")
-	return nil
+		p.wg.Wait()
+		log.Printf("[INFO] HTTP proxy stopped")
+	})
+	return err
 }
 
 // ReloadConfig updates the proxy configuration and credentials.
@@ -291,7 +295,13 @@ func (p *Proxy) handleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.R
 
 	// Inject credentials
 	if route.Inject.Header != "" && route.Inject.Value != "" {
-		value, err := resolveHeaderValue(route.Inject.Value, p.creds, p.credOpts)
+		// Snapshot creds under lock to avoid data race with ReloadConfig
+		p.cfgMu.RLock()
+		creds := p.creds
+		credOpts := p.credOpts
+		p.cfgMu.RUnlock()
+
+		value, err := resolveHeaderValue(route.Inject.Value, creds, credOpts)
 		if err != nil {
 			// Log error but don't expose details
 			if cfg.LogLevel == "debug" || cfg.LogLevel == "errors" {

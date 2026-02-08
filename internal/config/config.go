@@ -291,6 +291,11 @@ func (c *Config) validateHTTPProxy() error {
 		return fmt.Errorf("invalid log_level %q (must be none, errors, info, or debug)", cfg.LogLevel)
 	}
 
+	// Normalize empty log_level to documented default
+	if cfg.LogLevel == "" {
+		c.HTTPProxy.LogLevel = "errors"
+	}
+
 	// Validate CA config
 	if cfg.CA.ValidityDays < 0 {
 		return fmt.Errorf("ca.validity_days must be non-negative")
@@ -351,23 +356,37 @@ func (c *Config) validateHTTPProxy() error {
 
 // compileHostPattern compiles a host pattern (exact or *.suffix) to regex.
 // Suffix-anchored to prevent subdomain attacks.
+// Patterns are normalized to lowercase since hostnames are case-insensitive.
 func compileHostPattern(pattern string) (*regexp.Regexp, error) {
+	pattern = strings.TrimSpace(pattern)
 	if pattern == "" {
 		return nil, fmt.Errorf("empty pattern")
 	}
 
-	// Escape special regex chars except *
-	escaped := regexp.QuoteMeta(pattern)
+	// Reject empty wildcard suffix (e.g. "*.")
+	if pattern == "*." {
+		return nil, fmt.Errorf("invalid wildcard pattern: empty suffix")
+	}
+
+	// Normalize to lowercase (hostnames are case-insensitive)
+	pattern = strings.ToLower(pattern)
+	// Trim trailing dot (FQDN normalization)
+	pattern = strings.TrimSuffix(pattern, ".")
+
+	if pattern == "" {
+		return nil, fmt.Errorf("empty pattern after normalization")
+	}
 
 	// Handle wildcard prefix *.
 	if strings.HasPrefix(pattern, "*.") {
 		// *.example.com -> matches sub.example.com but NOT example.com
 		// Suffix-anchored: must end with .example.com
-		suffix := escaped[4:] // Remove escaped \*\.
+		suffix := regexp.QuoteMeta(pattern[2:]) // Skip "*."
 		return regexp.Compile(`^[^.]+\.` + suffix + `$`)
 	}
 
 	// Exact match
+	escaped := regexp.QuoteMeta(pattern)
 	return regexp.Compile(`^` + escaped + `$`)
 }
 
@@ -784,6 +803,14 @@ func (c *Config) GetHTTPProxyCAPath() string {
 		return ""
 	}
 	return c.HTTPProxy.CA.Path
+}
+
+// GetHTTPProxyRequireAuth returns whether proxy authentication is required.
+func (c *Config) GetHTTPProxyRequireAuth() bool {
+	if c.HTTPProxy == nil {
+		return true // default
+	}
+	return c.HTTPProxy.GetRequireAuth()
 }
 
 // GetTimeout returns the tool-specific timeout or falls back to the global default.

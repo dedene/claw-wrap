@@ -994,6 +994,54 @@ func TestCompileHostPattern_Empty(t *testing.T) {
 	}
 }
 
+func TestCompileHostPattern_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		pattern string
+		host    string
+		want    bool
+	}{
+		// Case-insensitive exact match (pattern has uppercase)
+		{"API.GitHub.COM", "api.github.com", true},
+		{"api.github.com", "API.GITHUB.COM", false}, // host not normalized here, test pattern normalization
+
+		// Case-insensitive wildcard (pattern has uppercase)
+		{"*.Example.COM", "sub.example.com", true},
+		{"*.GITHUB.COM", "api.github.com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_"+tt.host, func(t *testing.T) {
+			re, err := compileHostPattern(tt.pattern)
+			if err != nil {
+				t.Fatalf("compileHostPattern(%q) error = %v", tt.pattern, err)
+			}
+			got := re.MatchString(tt.host)
+			if got != tt.want {
+				t.Errorf("pattern %q match %q = %v, want %v", tt.pattern, tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompileHostPattern_InvalidWildcard(t *testing.T) {
+	// "*." is invalid (empty suffix)
+	_, err := compileHostPattern("*.")
+	if err == nil {
+		t.Error("compileHostPattern(\"*.\") should return error for empty suffix")
+	}
+}
+
+func TestCompileHostPattern_TrailingDot(t *testing.T) {
+	// Trailing dot should be normalized away (FQDN)
+	re, err := compileHostPattern("example.com.")
+	if err != nil {
+		t.Fatalf("compileHostPattern(\"example.com.\") error = %v", err)
+	}
+	if !re.MatchString("example.com") {
+		t.Error("pattern with trailing dot should match normalized host")
+	}
+}
+
 func TestCompilePathRule(t *testing.T) {
 	tests := []struct {
 		pattern string

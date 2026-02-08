@@ -133,6 +133,31 @@ func TestProxy_StartStop(t *testing.T) {
 	}
 }
 
+func TestProxy_DoubleStopIdempotent(t *testing.T) {
+	disableSSRFForTest(t)
+
+	cfg := &config.HTTPProxyConfig{
+		Enabled:  true,
+		LogLevel: "errors",
+		CA:       config.CAConfig{Path: t.TempDir()},
+	}
+	proxy := New(cfg, nil, WithAuthToken(testProxyAuthToken))
+
+	if err := proxy.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	// First stop should succeed
+	if err := proxy.Stop(); err != nil {
+		t.Errorf("first Stop() error: %v", err)
+	}
+
+	// Second stop should also succeed (not panic)
+	if err := proxy.Stop(); err != nil {
+		t.Errorf("second Stop() error: %v", err)
+	}
+}
+
 func TestProxy_Start_RequiresAuthToken(t *testing.T) {
 	cfg := &config.HTTPProxyConfig{
 		Enabled: true,

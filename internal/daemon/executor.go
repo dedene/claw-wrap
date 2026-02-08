@@ -22,6 +22,7 @@ import (
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
 	"claw-wrap/internal/framing"
+	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
 )
 
@@ -138,8 +139,8 @@ type ToolExecutor struct {
 
 // NewToolExecutor creates a new ToolExecutor for the given request.
 func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.ToolDef, cfg *config.Config, proxyAuthToken string) (*ToolExecutor, error) {
-	// Validate proxy auth token for tools that require proxy
-	if tool.UseProxy && cfg.GetHTTPProxyEnabled() && proxyAuthToken == "" {
+	// Validate proxy auth token for tools that require proxy (only when auth is required)
+	if tool.UseProxy && cfg.GetHTTPProxyEnabled() && cfg.GetHTTPProxyRequireAuth() && proxyAuthToken == "" {
 		return nil, fmt.Errorf("proxy auth token required for tool %q with use_proxy enabled", req.Tool)
 	}
 
@@ -292,9 +293,16 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 
 	// Inject HTTP proxy env vars if tool opts in
 	if e.tool.UseProxy && e.cfg.GetHTTPProxyEnabled() {
-		proxyURL, err := buildAuthenticatedProxyURL(e.cfg.GetHTTPProxyListen(), e.proxyAuthToken)
-		if err != nil {
-			return nil, fmt.Errorf("build proxy URL: %w", err)
+		var proxyURL string
+		if e.cfg.GetHTTPProxyRequireAuth() {
+			var err error
+			proxyURL, err = buildAuthenticatedProxyURL(e.cfg.GetHTTPProxyListen(), e.proxyAuthToken)
+			if err != nil {
+				return nil, fmt.Errorf("build proxy URL: %w", err)
+			}
+		} else {
+			// No auth required - use simple URL without credentials
+			proxyURL = "http://" + e.cfg.GetHTTPProxyListen()
 		}
 		envMap["HTTP_PROXY"] = proxyURL
 		envMap["HTTPS_PROXY"] = proxyURL
@@ -302,13 +310,16 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		envMap["https_proxy"] = proxyURL
 
 		// Inject CA cert paths for various clients
-		if caPath := e.cfg.GetHTTPProxyCAPath(); caPath != "" {
-			certFile := filepath.Join(caPath, "ca.crt")
-			envMap["SSL_CERT_FILE"] = certFile
-			envMap["NODE_EXTRA_CA_CERTS"] = certFile
-			envMap["REQUESTS_CA_BUNDLE"] = certFile
-			envMap["CURL_CA_BUNDLE"] = certFile
+		// Fallback to platform default if not configured
+		caPath := e.cfg.GetHTTPProxyCAPath()
+		if caPath == "" {
+			caPath = paths.CADir()
 		}
+		certFile := filepath.Join(caPath, "ca.crt")
+		envMap["SSL_CERT_FILE"] = certFile
+		envMap["NODE_EXTRA_CA_CERTS"] = certFile
+		envMap["REQUESTS_CA_BUNDLE"] = certFile
+		envMap["CURL_CA_BUNDLE"] = certFile
 
 		log.Printf("[DEBUG] Injected proxy env vars for tool %s", e.req.Tool)
 	}

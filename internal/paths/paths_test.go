@@ -77,9 +77,14 @@ func TestCADir_PlatformSpecific(t *testing.T) {
 
 	switch runtime.GOOS {
 	case "darwin":
-		// macOS should use ~/.claw-wrap/ca
-		home, _ := os.UserHomeDir()
-		want := filepath.Join(home, ".claw-wrap", "ca")
+		// macOS should use ~/.claw-wrap/ca; if HOME unavailable, fallback to /tmp/claw-wrap/ca
+		home, err := os.UserHomeDir()
+		var want string
+		if err != nil {
+			want = "/tmp/claw-wrap/ca"
+		} else {
+			want = filepath.Join(home, ".claw-wrap", "ca")
+		}
 		if got != want {
 			t.Errorf("CADir() = %q, want %q", got, want)
 		}

@@ -271,7 +271,25 @@ func (d *Daemon) reloadConfig() error {
 			return fmt.Errorf("start HTTP proxy: %w", err)
 		}
 	case d.httpProxy != nil && newCfg.GetHTTPProxyEnabled():
-		d.httpProxy.ReloadConfig(newCfg.GetHTTPProxyConfig(), newCfg.Credentials)
+		// Check if settings changed that require a restart
+		oldCfg := d.cfg.GetHTTPProxyConfig()
+		newHTTPCfg := newCfg.GetHTTPProxyConfig()
+		needsRestart := oldCfg.Listen != newHTTPCfg.Listen ||
+			oldCfg.GetRequireAuth() != newHTTPCfg.GetRequireAuth() ||
+			oldCfg.CA.Path != newHTTPCfg.CA.Path
+
+		if needsRestart {
+			log.Printf("[INFO] HTTP proxy config changed (listen/auth/CA), restarting proxy")
+			if err := d.httpProxy.Stop(); err != nil {
+				return fmt.Errorf("stop HTTP proxy for restart: %w", err)
+			}
+			d.httpProxy = nil
+			if err := d.startHTTPProxy(newCfg); err != nil {
+				return fmt.Errorf("restart HTTP proxy: %w", err)
+			}
+		} else {
+			d.httpProxy.ReloadConfig(newHTTPCfg, newCfg.Credentials)
+		}
 	}
 
 	d.cfg = newCfg
