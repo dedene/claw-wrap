@@ -7,7 +7,7 @@
     <a href="https://goreportcard.com/report/github.com/dedene/claw-wrap"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/dedene/claw-wrap" /></a>
     <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg" /></a>
   </p>
-  <p>A secure credential proxy for CLI tools. Executes tools with secrets on behalf of sandboxed processes — credentials never enter the sandbox.</p>
+  <p>A secure credential proxy for CLI tools and HTTP APIs. Executes tools with secrets on behalf of sandboxed processes, or injects credentials into HTTP requests via MITM proxy — credentials never enter the sandbox.</p>
   <p>
     <a href="docs/INSTALL.md">Install</a> ·
     <a href="docs/CONFIG.md">Config</a> ·
@@ -61,6 +61,25 @@ You can also block dangerous commands server-side — the agent can `gh repo lis
 │  ⚠️  Credentials NEVER leave the daemon process         │
 └─────────────────────────────────────────────────────────┘
 ```
+
+## Two Modes
+
+claw-wrap supports two approaches for credential injection:
+
+| Mode | Best For | How It Works |
+|------|----------|--------------|
+| **CLI Wrapper** | CLI tools (gh, aws, gcloud) | Symlink intercepts command, daemon executes with credentials |
+| **HTTP Proxy** | HTTP APIs, curl, SDKs | MITM proxy injects auth headers into matching requests |
+
+**Use CLI Wrapper when:**
+- Tool supports env-based credentials (GH_TOKEN, AWS_ACCESS_KEY_ID)
+- You want to block specific commands (e.g., `gh repo delete`)
+- Tool doesn't support HTTP proxy
+
+**Use HTTP Proxy when:**
+- Tool makes HTTP calls to APIs (curl, Python requests, Node fetch)
+- You want route-based credential injection by host/path
+- Multiple tools need the same API credentials
 
 ## Quick Start
 
@@ -200,6 +219,35 @@ tools:
 
 The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited environment and set by the daemon.
 
+## HTTP Proxy Mode
+
+For tools that make HTTP API calls, claw-wrap can act as a MITM proxy that injects credentials based on request host/path:
+
+```yaml
+http_proxy:
+  enabled: true
+  listen: 127.0.0.1:8080
+  routes:
+    - host: api.github.com
+      inject:
+        header: Authorization
+        value: "Bearer {{github-token}}"
+      deny:
+        - DELETE /**
+
+tools:
+  curl:
+    binary: /usr/bin/curl
+    use_proxy: true  # Injects HTTP_PROXY + CA trust
+```
+
+The proxy:
+- Auto-generates a CA certificate for HTTPS interception
+- Requires authentication (token auto-injected for `use_proxy: true` tools)
+- Supports allow/deny rules per route
+
+See [HTTP Proxy Settings](docs/CONFIG.md#http-proxy-settings) for full configuration.
+
 ### Request integrity and replay protection
 
 - HMAC signature covers `tool`, `args`, `cwd`, and request `env` (protocol v2).
@@ -219,6 +267,7 @@ See [docs/SANDBOX.md](docs/SANDBOX.md) for the full guide — firejail profile, 
 
 - [Installation Guide](docs/INSTALL.md) — full setup with `pass`, systemd, and troubleshooting
 - [Configuration Reference](docs/CONFIG.md) — all options for credentials, tools, blocked args, config file injection
+- [HTTP Proxy Setup](docs/CONFIG.md#http-proxy-settings) — MITM proxy for API credential injection
 - [Sandbox Setup](docs/SANDBOX.md) — firejail (Linux) and nono (macOS) with verification steps
 - [Protocol Specification](docs/SPEC.md) — HMAC authentication, message framing, proxy protocol
 
