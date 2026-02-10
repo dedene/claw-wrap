@@ -125,6 +125,74 @@ tools:
         - openhue-key
 ```
 
+## Git with GitHub Authentication
+
+Git requires special handling:
+1. It needs write access to `.git/` directories (blocked by systemd's `ProtectHome=read-only`)
+2. Using `credential.helper` with wrapped tools (like `gh auth git-credential`) causes recursive claw-wrap calls that get denied
+
+Use the `GIT_ASKPASS` approach instead:
+
+### Configuration
+
+```yaml
+credentials:
+  github-token:
+    source: pass:cli/github/token
+
+tools:
+  git:
+    binary: /usr/bin/git
+    env:
+      GH_TOKEN: github-token
+    forced_env:
+      GIT_ASKPASS: /usr/local/bin/git-askpass-claw
+      GIT_TERMINAL_PROMPT: "0"
+```
+
+### Create the askpass script
+
+```bash
+sudo install -m 755 /dev/stdin /usr/local/bin/git-askpass-claw <<'EOF'
+#!/bin/bash
+echo "$GH_TOKEN"
+EOF
+```
+
+The script simply echoes the token that claw-wrap injects. No recursive calls.
+
+### Add workspace write access
+
+If running in a firejail sandbox with systemd, add write access to your workspace:
+
+```bash
+sudo systemctl edit claw-wrap.service
+```
+
+```ini
+[Service]
+ReadWritePaths=/home/YOUR_USERNAME/repos
+```
+
+Then reload: `sudo systemctl daemon-reload && sudo systemctl restart claw-wrap`
+
+### Remove conflicting credential helpers
+
+If the repo has a credential helper that calls wrapped tools:
+
+```bash
+git config --global --unset credential.helper
+# Or per-repo:
+git config --unset credential.helper
+```
+
+### Why GIT_ASKPASS works
+
+- **Simple**: git calls the script, script prints the password, done
+- **No recursion**: Unlike credential helpers that might invoke `gh` or other wrapped tools
+- **Secure**: Token is injected by claw-wrap at runtime, never stored on disk
+- **Universal**: Works for all GitHub remotes, not tied to a specific URL
+
 ## Proxy Settings
 
 The `proxy:` section configures proxy mode behavior:

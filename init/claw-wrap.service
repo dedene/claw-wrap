@@ -29,6 +29,8 @@ RuntimeDirectoryPreserve=yes
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# If tools need to write to home directories (e.g., git fetch/push to a workspace),
+# add: ReadWritePaths=/home/YOUR_USERNAME/your-workspace
 ReadWritePaths=/run/openclaw
 PrivateTmp=true
 PrivateDevices=true

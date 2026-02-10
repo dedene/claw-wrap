@@ -185,8 +185,31 @@ Common symptoms:
 | V8/Node.js crash (`ENOMEM` in `SetPermissions`) | `MemoryDenyWriteExecute=true` | Set to `false` |
 | "token invalid" / network errors | `RestrictAddressFamilies=AF_UNIX` | Add `AF_INET AF_INET6` |
 | Tool hangs or gets killed | `SystemCallFilter` too strict | Check `journalctl` for SECCOMP audit messages |
+| "Read-only file system" on git fetch/push | `ProtectHome=read-only` blocks workspace writes | Add `ReadWritePaths=/path/to/workspace` |
 
 After changes: `sudo systemctl daemon-reload && sudo systemctl restart claw-wrap`
+
+### Workspace write failures (git, file operations)
+
+The default unit has `ProtectHome=read-only`, which makes `/home` read-only for the daemon
+and all spawned tools. If your tools need to write files (git fetch, git push, file downloads),
+add your workspace to `ReadWritePaths`:
+
+```bash
+sudo systemctl edit claw-wrap.service
+```
+
+Add:
+```ini
+[Service]
+ReadWritePaths=/home/YOUR_USERNAME/.openclaw
+```
+
+Then reload and restart:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart claw-wrap
+```
 
 ### Credential fetch fails
 
