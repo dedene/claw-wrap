@@ -130,6 +130,235 @@ func TestValidate_EmptyBlockedArgs(t *testing.T) {
 	}
 }
 
+// --- Allowlist mode validation tests ---
+
+func TestValidate_AllowedArgs_ValidConfig(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Mode:   ToolModeAllowlist,
+				AllowedArgs: []BlockedArg{
+					{Pattern: `^(repo|issue|pr)\s+(list|view|status)`, Match: BlockedArgMatchCommand, Message: "read only"},
+					{Pattern: `^(version|help)$`, Message: "info only"},
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+
+	for i, a := range cfg.Tools["gh"].AllowedArgs {
+		if a.Compiled == nil {
+			t.Errorf("AllowedArgs[%d].Compiled is nil after Validate()", i)
+		}
+	}
+
+	if cfg.Tools["gh"].Mode != ToolModeAllowlist {
+		t.Errorf("Mode = %q, want %q", cfg.Tools["gh"].Mode, ToolModeAllowlist)
+	}
+}
+
+func TestValidate_AllowedArgs_InvalidRegex(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Mode:   ToolModeAllowlist,
+				AllowedArgs: []BlockedArg{
+					{Pattern: "[invalid(", Message: "bad"},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for invalid allowed_args regex")
+	}
+	if !strings.Contains(err.Error(), "allowed_args") {
+		t.Errorf("error = %q, want allowed_args mention", err.Error())
+	}
+}
+
+func TestValidate_AllowedArgs_InvalidMatchMode(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Mode:   ToolModeAllowlist,
+				AllowedArgs: []BlockedArg{
+					{Pattern: `safe`, Match: "invalid"},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for invalid match mode")
+	}
+	if !strings.Contains(err.Error(), "invalid allowed_args match") {
+		t.Errorf("error = %q, want invalid allowed_args match error", err.Error())
+	}
+}
+
+func TestValidate_AllowedArgs_MatchModeNormalization(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Mode:   ToolModeAllowlist,
+				AllowedArgs: []BlockedArg{
+					{Pattern: `safe`}, // empty match → default "arg"
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	if cfg.Tools["gh"].AllowedArgs[0].Match != BlockedArgMatchArg {
+		t.Errorf("Match = %q, want default %q", cfg.Tools["gh"].AllowedArgs[0].Match, BlockedArgMatchArg)
+	}
+}
+
+func TestValidate_Mode_DefaultBlocklist(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {Binary: "/usr/bin/gh"},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	if cfg.Tools["gh"].Mode != ToolModeBlocklist {
+		t.Errorf("Mode = %q, want default %q", cfg.Tools["gh"].Mode, ToolModeBlocklist)
+	}
+}
+
+func TestValidate_Mode_InvalidValue(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {Binary: "/usr/bin/gh", Mode: "permissive"},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for invalid mode")
+	}
+	if !strings.Contains(err.Error(), "invalid mode") {
+		t.Errorf("error = %q, want invalid mode error", err.Error())
+	}
+}
+
+func TestValidate_AllowedArgsWithoutAllowlistMode(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				// No mode set (defaults to blocklist)
+				AllowedArgs: []BlockedArg{
+					{Pattern: `safe`},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error — allowed_args requires mode: allowlist")
+	}
+	if !strings.Contains(err.Error(), "allowed_args requires mode: allowlist") {
+		t.Errorf("error = %q, want allowed_args requires mode error", err.Error())
+	}
+}
+
+func TestValidate_AllowlistWithNoAllowedArgs(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Mode:   ToolModeAllowlist,
+				// No allowed_args → nothing can pass → fail-closed validation error
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error — allowlist needs allowed_args")
+	}
+	if !strings.Contains(err.Error(), "requires allowed_args") {
+		t.Errorf("error = %q, want requires allowed_args error", err.Error())
+	}
+}
+
+func TestValidate_AllowlistWithBothLists(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Mode:   ToolModeAllowlist,
+				BlockedArgs: []BlockedArg{
+					{Pattern: `--include-sensitive`, Message: "blocked"},
+				},
+				AllowedArgs: []BlockedArg{
+					{Pattern: `^(repo|issue)\s+(list|view)`, Match: BlockedArgMatchCommand, Message: "read only"},
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil — both lists valid in allowlist mode", err)
+	}
+}
+
+func TestLoad_AllowedArgsFromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlContent := `tools:
+  gh:
+    binary: /usr/bin/gh
+    mode: allowlist
+    allowed_args:
+      - pattern: "^(repo|issue|pr)\\s+(list|view|status)"
+        match: command
+        message: "Only read operations allowed"
+      - pattern: "^(version|help)$"
+        message: "Info commands only"
+`
+	path := filepath.Join(tmpDir, "allowlist.yaml")
+	if err := os.WriteFile(path, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	tool := cfg.Tools["gh"]
+	if tool.Mode != ToolModeAllowlist {
+		t.Errorf("Mode = %q, want %q", tool.Mode, ToolModeAllowlist)
+	}
+	if len(tool.AllowedArgs) != 2 {
+		t.Fatalf("AllowedArgs count = %d, want 2", len(tool.AllowedArgs))
+	}
+	for i, a := range tool.AllowedArgs {
+		if a.Compiled == nil {
+			t.Errorf("AllowedArgs[%d].Compiled is nil after Load()", i)
+		}
+	}
+}
+
 func TestValidate_MixedValidInvalid(t *testing.T) {
 	cfg := Config{
 		Tools: map[string]ToolDef{
@@ -1218,4 +1447,128 @@ func TestHTTPProxyConfig_GetRequireAuth(t *testing.T) {
 			t.Error("GetRequireAuth() = true, want false")
 		}
 	})
+}
+
+// --- Audit config tests ---
+
+func TestValidate_AuditConfig_Valid(t *testing.T) {
+	cfg := &Config{
+		Audit: &AuditConfig{
+			Enabled: true,
+			File:    "/var/log/claw-wrap/audit.jsonl",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidate_AuditConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := &Config{
+		Audit: &AuditConfig{
+			Enabled: false,
+			File:    "relative/bad/path",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil (disabled should skip validation)", err)
+	}
+}
+
+func TestValidate_AuditConfig_NoOutput(t *testing.T) {
+	cfg := &Config{
+		Audit: &AuditConfig{
+			Enabled: true,
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for no output configured")
+	}
+	if !strings.Contains(err.Error(), "at least one output") {
+		t.Errorf("error = %q, want 'at least one output'", err.Error())
+	}
+}
+
+func TestValidate_AuditConfig_RelativeFile(t *testing.T) {
+	cfg := &Config{
+		Audit: &AuditConfig{
+			Enabled: true,
+			File:    "relative/audit.jsonl",
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for relative path")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("error = %q, want 'absolute'", err.Error())
+	}
+}
+
+func TestValidate_AuditConfig_SyslogOnly(t *testing.T) {
+	cfg := &Config{
+		Audit: &AuditConfig{
+			Enabled: true,
+			Syslog:  true,
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil (syslog-only is valid)", err)
+	}
+}
+
+func TestValidate_AuditConfig_InvalidSyslogFacility(t *testing.T) {
+	cfg := &Config{
+		Audit: &AuditConfig{
+			Enabled:        true,
+			File:           "/var/log/audit.jsonl",
+			Syslog:         true,
+			SyslogFacility: "daemon",
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error for invalid syslog_facility")
+	}
+	if !strings.Contains(err.Error(), "syslog_facility") {
+		t.Errorf("error = %q, want syslog_facility error", err.Error())
+	}
+}
+
+func TestGetAuditEnabled(t *testing.T) {
+	if (&Config{}).GetAuditEnabled() {
+		t.Error("nil audit config should return false")
+	}
+	if (&Config{Audit: &AuditConfig{}}).GetAuditEnabled() {
+		t.Error("disabled audit should return false")
+	}
+	if !(&Config{Audit: &AuditConfig{Enabled: true}}).GetAuditEnabled() {
+		t.Error("enabled audit should return true")
+	}
+}
+
+func TestAuditConfig_BoolDefaults(t *testing.T) {
+	a := &AuditConfig{}
+	if !a.GetIncludeArgs() {
+		t.Error("GetIncludeArgs() default should be true")
+	}
+	if !a.GetIncludeOutputHash() {
+		t.Error("GetIncludeOutputHash() default should be true")
+	}
+	if !a.GetIncludeDuration() {
+		t.Error("GetIncludeDuration() default should be true")
+	}
+
+	f := false
+	a2 := &AuditConfig{IncludeArgs: &f, IncludeOutputHash: &f, IncludeDuration: &f}
+	if a2.GetIncludeArgs() {
+		t.Error("GetIncludeArgs() should be false when explicitly set")
+	}
+	if a2.GetIncludeOutputHash() {
+		t.Error("GetIncludeOutputHash() should be false when explicitly set")
+	}
+	if a2.GetIncludeDuration() {
+		t.Error("GetIncludeDuration() should be false when explicitly set")
+	}
 }

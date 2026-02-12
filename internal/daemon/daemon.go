@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"claw-wrap/internal/audit"
 	"claw-wrap/internal/auth"
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
@@ -58,6 +59,7 @@ type Daemon struct {
 
 	proxyAuthToken     string
 	proxyAuthTokenPath string
+	auditLogger        audit.Logger
 }
 
 var (
@@ -133,6 +135,13 @@ func (d *Daemon) Run() error {
 	setOPTokenFileFunc(cfg.GetOPTokenFile())
 	setCredentialCacheTTLFunc(cfg.GetCredentialCacheTTL())
 	defer cleanupBWSessionFunc()
+
+	auditLogger, err := audit.New(cfg.GetAuditConfig())
+	if err != nil {
+		return fmt.Errorf("init audit logger: %w", err)
+	}
+	d.auditLogger = auditLogger
+	defer d.auditLogger.Close()
 
 	secret, err := auth.GenerateSecret()
 	if err != nil {
@@ -292,6 +301,18 @@ func (d *Daemon) reloadConfig() error {
 		}
 	}
 
+	// Reload audit logger if config changed (before swapping d.cfg)
+	if auditConfigChanged(d.cfg, newCfg) {
+		if d.auditLogger != nil {
+			d.auditLogger.Close()
+		}
+		newLogger, err := audit.New(newCfg.GetAuditConfig())
+		if err != nil {
+			return fmt.Errorf("reload audit logger: %w", err)
+		}
+		d.auditLogger = newLogger
+	}
+
 	d.cfg = newCfg
 	if d.replayCache != nil {
 		d.replayCache.UpdateSettings(newCfg.GetReplayCacheTTL(), newCfg.GetReplayCacheMaxEntries())
@@ -430,7 +451,7 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		return
 	}
 
-	callerInfo := fmt.Sprintf("pid:%d", ucred.PID)
+	var callerExe string // actual exe path; empty if unresolvable
 	exe, err := resolvePeerExecutableFunc(ucred.PID)
 	if err != nil {
 		if cfg.DenyUnverifiedCallerExe() {
@@ -439,9 +460,9 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 			errSend(conn, "unauthorized caller")
 			return
 		}
-		callerInfo = fmt.Sprintf("pid:%d exe:unverified", ucred.PID)
+		// callerExe stays empty — audit will record empty string
 	} else {
-		callerInfo = exe
+		callerExe = exe
 		if !d.isAllowedBinary(exe) {
 			d.metrics.Inc("caller_verify_fail")
 			log.Printf("[WARN] deny reason=exe_not_allowed exe=%q", exe)
@@ -450,13 +471,17 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		}
 	}
 
-	log.Printf("[DEBUG] peer pid=%d uid=%d exe=%s", ucred.PID, ucred.UID, callerInfo)
+	if callerExe != "" {
+		log.Printf("[DEBUG] peer pid=%d uid=%d exe=%s", ucred.PID, ucred.UID, callerExe)
+	} else {
+		log.Printf("[DEBUG] peer pid=%d uid=%d exe=unverified", ucred.PID, ucred.UID)
+	}
 
 	switch {
 	case rawRequest["admin"] != nil:
 		d.handleAdminRequest(conn, payload, cfg, ucred.UID, ucred.PID)
 	case isProxy:
-		d.handleProxyRequest(conn, payload, cfg, callerInfo, ucred.UID)
+		d.handleProxyRequest(conn, payload, cfg, ucred.PID, callerExe, ucred.UID)
 	default:
 		d.sendError(conn, "invalid request: use proxy protocol")
 	}
@@ -575,7 +600,7 @@ func (d *Daemon) authorizeAdminCheckCaller(pid int32) error {
 	return nil
 }
 
-func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Config, callerInfo string, uid uint32) {
+func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Config, callerPID int32, callerExe string, uid uint32) {
 	var req protocol.ProxyRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		d.sendProxyError(conn, "invalid request")
@@ -610,16 +635,16 @@ func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Conf
 		return
 	}
 
-	if allowed, msg := checkBlockedArgs(req.Args, tool.BlockedArgs); !allowed {
-		d.metrics.Inc("blocked_args")
-		log.Printf("[INFO] deny reason=blocked_args tool=%s msg=%s", req.Tool, msg)
+	if allowed, msg := checkToolArgs(req.Args, &tool); !allowed {
+		d.metrics.Inc("args_denied")
+		log.Printf("[INFO] deny reason=args_policy tool=%s msg=%s", req.Tool, msg)
 		d.sendProxyError(conn, fmt.Sprintf("blocked: %s", msg))
 		return
 	}
 
-	log.Printf("[INFO] proxy tool=%s cwd=%s from=%s", req.Tool, req.Cwd, callerInfo)
+	log.Printf("[INFO] proxy tool=%s cwd=%s from=%s", req.Tool, req.Cwd, callerExe)
 
-	executor, err := NewToolExecutor(conn, &req, &tool, cfg, d.proxyAuthToken)
+	executor, err := NewToolExecutor(conn, &req, &tool, cfg, d.proxyAuthToken, d.auditLogger, callerPID, callerExe)
 	if err != nil {
 		log.Printf("[ERROR] executor init failed: %v", err)
 		d.sendProxyError(conn, err.Error())
@@ -795,46 +820,6 @@ func (d *Daemon) sendProxyError(conn net.Conn, message string) {
 	})
 }
 
-func checkBlockedArgs(args []string, blocked []config.BlockedArg) (bool, string) {
-	if len(blocked) == 0 {
-		return true, ""
-	}
-
-	joinedArgs := strings.Join(args, " ")
-
-	for _, b := range blocked {
-		if b.Compiled == nil {
-			log.Printf("[ERROR] nil compiled pattern for %q - fail-closed", b.Pattern)
-			return false, "internal error: invalid security pattern"
-		}
-
-		switch b.Match {
-		case "", config.BlockedArgMatchArg:
-			for _, arg := range args {
-				if b.Compiled.MatchString(arg) {
-					return false, blockedArgMessage(b.Message)
-				}
-			}
-		case config.BlockedArgMatchCommand:
-			if b.Compiled.MatchString(joinedArgs) {
-				return false, blockedArgMessage(b.Message)
-			}
-		default:
-			log.Printf("[ERROR] invalid blocked_args match mode %q - fail-closed", b.Match)
-			return false, "internal error: invalid security pattern"
-		}
-	}
-
-	return true, ""
-}
-
-func blockedArgMessage(msg string) string {
-	if msg == "" {
-		return "operation blocked by security policy"
-	}
-	return msg
-}
-
 // yamlEscapeValue wraps a credential value in single quotes for safe YAML
 // interpolation. Embedded single quotes are escaped per the YAML spec by
 // doubling them (” inside a single-quoted scalar).
@@ -956,4 +941,19 @@ func sweepStaleTempDirs() {
 			log.Printf("[INFO] swept stale temp dir: %s", m)
 		}
 	}
+}
+
+func auditConfigChanged(old, new *config.Config) bool {
+	oa := old.GetAuditConfig()
+	na := new.GetAuditConfig()
+	if oa == nil && na == nil {
+		return false
+	}
+	if oa == nil || na == nil {
+		return true
+	}
+	return oa.Enabled != na.Enabled ||
+		oa.File != na.File ||
+		oa.Syslog != na.Syslog ||
+		oa.SyslogFacility != na.SyslogFacility
 }

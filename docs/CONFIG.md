@@ -740,6 +740,13 @@ tools:
       MAX_RESULTS: "100"
 ```
 
+### `mode` (optional)
+
+Controls the argument restriction mode for the tool.
+
+- `blocklist` (default): Only `blocked_args` patterns are checked. Any match rejects the command.
+- `allowlist`: Commands must match at least one `allowed_args` pattern to proceed. Optional `blocked_args` are checked first (deny-first).
+
 ### `blocked_args` (optional)
 
 List of regex patterns that block certain arguments.
@@ -761,6 +768,30 @@ tools:
       - pattern: "--force"
         message: "Force flag blocked"
 ```
+
+### `allowed_args` (optional, requires `mode: allowlist`)
+
+List of regex patterns that define which arguments are permitted. At least one pattern must match for the command to proceed. Structure is identical to `blocked_args`.
+
+```yaml
+tools:
+  gh:
+    binary: /usr/bin/gh
+    mode: allowlist
+    allowed_args:
+      - pattern: "^(repo|issue|pr)\\s+(list|view|status)"
+        match: command
+        message: "Only read operations allowed"
+      - pattern: "^(version|help)$"
+        match: arg
+        message: "Only informational commands allowed"
+```
+
+When both `blocked_args` and `allowed_args` are present (with `mode: allowlist`):
+1. `blocked_args` are checked first (any match = deny)
+2. `allowed_args` are checked next (at least one must match)
+
+This layered approach lets you allowlist broad categories while still blocking specific dangerous patterns within them.
 
 ### `config_file` (optional)
 
@@ -805,7 +836,7 @@ Credential values are automatically YAML-escaped using single-quote wrapping bef
 
 ## Security Notes
 
-1. **Blocked args are enforced server-side** — default `arg` mode is per-argument; use `match: command` for cross-arg patterns
+1. **Arg restrictions are enforced server-side** — default `arg` mode is per-argument; use `match: command` for cross-arg patterns; `mode: allowlist` is fail-closed (no match = deny)
 2. **Forced env vars cannot be overridden** — stripped from inherited environment
 3. **Config file paths are validated** — absolute/traversal paths are rejected
 4. **Config file is in a temp directory** — created with restrictive umask (0600), cleaned up after tool exits; stale dirs swept on daemon startup

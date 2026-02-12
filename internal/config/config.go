@@ -119,11 +119,47 @@ type InjectSpec struct {
 	Value  string `yaml:"value"`
 }
 
+// AuditConfig holds audit logging configuration.
+type AuditConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	File              string `yaml:"file"`
+	IncludeArgs       *bool  `yaml:"include_args"`
+	IncludeOutputHash *bool  `yaml:"include_output_hash"`
+	IncludeDuration   *bool  `yaml:"include_duration"`
+	Syslog            bool   `yaml:"syslog"`
+	SyslogFacility    string `yaml:"syslog_facility"`
+}
+
+// GetIncludeArgs returns whether to include args in audit entries (default true).
+func (a *AuditConfig) GetIncludeArgs() bool {
+	if a.IncludeArgs == nil {
+		return true
+	}
+	return *a.IncludeArgs
+}
+
+// GetIncludeOutputHash returns whether to include output hash (default true).
+func (a *AuditConfig) GetIncludeOutputHash() bool {
+	if a.IncludeOutputHash == nil {
+		return true
+	}
+	return *a.IncludeOutputHash
+}
+
+// GetIncludeDuration returns whether to include duration (default true).
+func (a *AuditConfig) GetIncludeDuration() bool {
+	if a.IncludeDuration == nil {
+		return true
+	}
+	return *a.IncludeDuration
+}
+
 // Config is the root configuration structure.
 type Config struct {
 	Proxy       *ProxyConfig             `yaml:"proxy,omitempty"`
 	Security    *SecurityConfig          `yaml:"security,omitempty"`
 	HTTPProxy   *HTTPProxyConfig         `yaml:"http_proxy,omitempty"`
+	Audit       *AuditConfig             `yaml:"audit,omitempty"`
 	Credentials map[string]CredentialDef `yaml:"credentials"`
 	Tools       map[string]ToolDef       `yaml:"tools"`
 }
@@ -139,7 +175,9 @@ type ToolDef struct {
 	Timeout     string            `yaml:"timeout,omitempty"`
 	Env         map[string]string `yaml:"env,omitempty"`
 	ForcedEnv   map[string]string `yaml:"forced_env,omitempty"`
+	Mode        string            `yaml:"mode,omitempty"`          // "blocklist" (default) or "allowlist"
 	BlockedArgs []BlockedArg      `yaml:"blocked_args,omitempty"`
+	AllowedArgs []BlockedArg      `yaml:"allowed_args,omitempty"`
 	ConfigFile  *ConfigFileDef    `yaml:"config_file,omitempty"`
 	UseProxy    bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
 }
@@ -165,6 +203,11 @@ const (
 	BlockedArgMatchArg = "arg"
 	// BlockedArgMatchCommand matches against strings.Join(args, " ").
 	BlockedArgMatchCommand = "command"
+
+	// ToolModeBlocklist rejects commands matching blocked_args (default).
+	ToolModeBlocklist = "blocklist"
+	// ToolModeAllowlist requires commands to match at least one allowed_args pattern.
+	ToolModeAllowlist = "allowlist"
 )
 
 var (
@@ -270,11 +313,64 @@ func (c *Config) Validate() error {
 			c.Tools[toolName].BlockedArgs[i].Match = matchMode
 			c.Tools[toolName].BlockedArgs[i].Compiled = re
 		}
+
+		// Validate and normalize mode.
+		mode := strings.TrimSpace(tool.Mode)
+		if mode == "" {
+			mode = ToolModeBlocklist
+		}
+		switch mode {
+		case ToolModeBlocklist, ToolModeAllowlist:
+		default:
+			return fmt.Errorf("tool %q: invalid mode %q (must be %q or %q)", toolName, tool.Mode, ToolModeBlocklist, ToolModeAllowlist)
+		}
+
+		// Cross-validation: allowed_args requires mode: allowlist.
+		if mode == ToolModeBlocklist && len(tool.AllowedArgs) > 0 {
+			return fmt.Errorf("tool %q: allowed_args requires mode: allowlist", toolName)
+		}
+
+		// Allowlist mode requires allowed_args (fail-closed: nothing would pass).
+		if mode == ToolModeAllowlist && len(tool.AllowedArgs) == 0 {
+			return fmt.Errorf("tool %q: mode %q requires allowed_args", toolName, ToolModeAllowlist)
+		}
+
+		// Compile allowed_args regex patterns.
+		for i, a := range tool.AllowedArgs {
+			matchMode := strings.TrimSpace(a.Match)
+			if matchMode == "" {
+				matchMode = BlockedArgMatchArg
+			}
+			switch matchMode {
+			case BlockedArgMatchArg, BlockedArgMatchCommand:
+			default:
+				return fmt.Errorf("tool %q: invalid allowed_args match %q (must be %q or %q)", toolName, a.Match, BlockedArgMatchArg, BlockedArgMatchCommand)
+			}
+
+			re, err := regexp.Compile(a.Pattern)
+			if err != nil {
+				return fmt.Errorf("tool %q: invalid allowed_args pattern %q: %w", toolName, a.Pattern, err)
+			}
+			c.Tools[toolName].AllowedArgs[i].Match = matchMode
+			c.Tools[toolName].AllowedArgs[i].Compiled = re
+		}
+
+		// Store normalized mode.
+		t := c.Tools[toolName]
+		t.Mode = mode
+		c.Tools[toolName] = t
 	}
 	// Validate HTTP proxy configuration
 	if c.HTTPProxy != nil && c.HTTPProxy.Enabled {
 		if err := c.validateHTTPProxy(); err != nil {
 			return fmt.Errorf("http_proxy: %w", err)
+		}
+	}
+
+	// Validate audit configuration
+	if c.Audit != nil && c.Audit.Enabled {
+		if err := c.validateAudit(); err != nil {
+			return fmt.Errorf("audit: %w", err)
 		}
 	}
 
@@ -823,4 +919,35 @@ func (t *ToolDef) GetTimeout(globalDefault time.Duration) time.Duration {
 		return globalDefault
 	}
 	return d
+}
+
+// validSyslogFacilities lists valid syslog facility names.
+var validSyslogFacilities = map[string]bool{
+	"local0": true, "local1": true, "local2": true, "local3": true,
+	"local4": true, "local5": true, "local6": true, "local7": true,
+}
+
+func (c *Config) validateAudit() error {
+	a := c.Audit
+
+	if a.File == "" && !a.Syslog {
+		return fmt.Errorf("at least one output (file or syslog) must be configured")
+	}
+	if a.File != "" && !filepath.IsAbs(a.File) {
+		return fmt.Errorf("file path must be absolute: %q", a.File)
+	}
+	if a.SyslogFacility != "" && !validSyslogFacilities[a.SyslogFacility] {
+		return fmt.Errorf("invalid syslog_facility %q (must be local0..local7)", a.SyslogFacility)
+	}
+	return nil
+}
+
+// GetAuditConfig returns the audit configuration.
+func (c *Config) GetAuditConfig() *AuditConfig {
+	return c.Audit
+}
+
+// GetAuditEnabled returns whether audit logging is enabled.
+func (c *Config) GetAuditEnabled() bool {
+	return c.Audit != nil && c.Audit.Enabled
 }

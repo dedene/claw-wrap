@@ -207,7 +207,7 @@ Credential values are single-quoted in YAML templates to prevent special charact
 - Malicious code in sandbox extracting credentials
 - Replay attacks (nonce + replay cache + 5-second window)
 - Request tampering (HMAC covers args/cwd/env/nonce with field separators)
-- Unauthorized tool operations (blocked_args with `arg`/`command` match modes)
+- Unauthorized tool operations (blocked_args/allowed_args with `arg`/`command` match modes)
 - Environment variable injection (comprehensive denylist)
 - YAML template injection (values single-quoted/escaped)
 - Path traversal (absolute CWD validation, symlink checks on secret files)
