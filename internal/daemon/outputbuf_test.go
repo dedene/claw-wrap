@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"testing"
@@ -209,4 +211,67 @@ func TestOutputBuffer_MaxOutputSize_FileMode(t *testing.T) {
 	}
 
 	buf.Cleanup()
+}
+
+func TestOutputBuffer_Tee_InlineMode(t *testing.T) {
+	var msgs []interface{}
+	var teeBuf bytes.Buffer
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
+	buf.SetTee(&teeBuf)
+
+	buf.Write([]byte("hello"))
+	buf.Write([]byte(" world"))
+
+	if got := teeBuf.String(); got != "hello world" {
+		t.Errorf("tee got %q, want %q", got, "hello world")
+	}
+}
+
+func TestOutputBuffer_Tee_FileMode(t *testing.T) {
+	var msgs []interface{}
+	var teeBuf bytes.Buffer
+	buf := NewOutputBuffer("stdout", 10, 0, mockSendFn(&msgs))
+	buf.SetTee(&teeBuf)
+
+	data := []byte("this exceeds the threshold definitely")
+	buf.Write(data)
+
+	if got := teeBuf.Bytes(); !bytes.Equal(got, data) {
+		t.Errorf("tee got %d bytes, want %d", len(got), len(data))
+	}
+	buf.Cleanup()
+}
+
+func TestOutputBuffer_Tee_SHA256(t *testing.T) {
+	var msgs []interface{}
+	h := sha256.New()
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
+	buf.SetTee(h)
+
+	buf.Write([]byte("hello"))
+	buf.Write([]byte(" world"))
+
+	expected := sha256.Sum256([]byte("hello world"))
+	if got := h.Sum(nil); !bytes.Equal(got, expected[:]) {
+		t.Error("SHA256 hash mismatch")
+	}
+}
+
+func TestOutputBuffer_Accumulated(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
+
+	if got := buf.Accumulated(); got != 0 {
+		t.Errorf("Accumulated() = %d, want 0", got)
+	}
+
+	buf.Write([]byte("hello"))
+	if got := buf.Accumulated(); got != 5 {
+		t.Errorf("Accumulated() = %d, want 5", got)
+	}
+
+	buf.Write([]byte(" world"))
+	if got := buf.Accumulated(); got != 11 {
+		t.Errorf("Accumulated() = %d, want 11", got)
+	}
 }

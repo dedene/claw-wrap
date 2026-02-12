@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -26,6 +27,7 @@ type OutputBuffer struct {
 	tempFile      *os.File                // nil until threshold exceeded
 	tempPath      string                  // path for cleanup/response
 	sendFn        func(interface{}) error // sends length-prefixed message
+	tee           io.Writer              // optional; receives copy of all raw bytes
 	mu            sync.Mutex
 }
 
@@ -55,9 +57,17 @@ func (b *OutputBuffer) Write(data []byte) error {
 		return nil
 	}
 
-	// Check output size limit
+	// Check output size limit before feeding tee/hash — rejected data must not
+	// affect the hash so that output_hash and output_bytes stay consistent.
 	if b.maxOutputSize > 0 && b.accumulated+int64(len(data)) > b.maxOutputSize {
 		return ErrOutputLimitExceeded
+	}
+
+	// Feed tee writer (e.g. SHA256 hasher) before inline/file branching
+	if b.tee != nil {
+		if _, err := b.tee.Write(data); err != nil {
+			return fmt.Errorf("tee write: %w", err)
+		}
 	}
 
 	// Check if this write would exceed the threshold
@@ -152,4 +162,17 @@ func (b *OutputBuffer) Cleanup() {
 		os.Remove(b.tempPath)
 		b.tempPath = ""
 	}
+}
+
+// SetTee sets an optional writer that receives a copy of all raw bytes.
+// Must be called before any Write calls (before pumpers start).
+func (b *OutputBuffer) SetTee(w io.Writer) {
+	b.tee = w
+}
+
+// Accumulated returns the total bytes written so far.
+func (b *OutputBuffer) Accumulated() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.accumulated
 }

@@ -3,9 +3,11 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"net"
@@ -19,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"claw-wrap/internal/audit"
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
 	"claw-wrap/internal/framing"
@@ -135,10 +138,17 @@ type ToolExecutor struct {
 	pumperWg sync.WaitGroup // WaitGroup for I/O pumpers
 
 	proxyAuthToken string
+
+	auditLogger audit.Logger
+	callerPID   int32
+	callerExe   string
+	startTime   time.Time
+	stdoutHash  hash.Hash
+	stderrHash  hash.Hash
 }
 
 // NewToolExecutor creates a new ToolExecutor for the given request.
-func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.ToolDef, cfg *config.Config, proxyAuthToken string) (*ToolExecutor, error) {
+func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.ToolDef, cfg *config.Config, proxyAuthToken string, auditLogger audit.Logger, callerPID int32, callerExe string) (*ToolExecutor, error) {
 	// Validate proxy auth token for tools that require proxy (only when auth is required)
 	if tool.UseProxy && cfg.GetHTTPProxyEnabled() && cfg.GetHTTPProxyRequireAuth() && proxyAuthToken == "" {
 		return nil, fmt.Errorf("proxy auth token required for tool %q with use_proxy enabled", req.Tool)
@@ -164,12 +174,16 @@ func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.Too
 		msgSize:        cfg.GetMaxStdinMessageSize(),
 		encoder:        framing.NewEncoder(conn),
 		proxyAuthToken: proxyAuthToken,
+		auditLogger:    auditLogger,
+		callerPID:      callerPID,
+		callerExe:      callerExe,
 	}, nil
 }
 
 // Run is the main entry point that executes the tool and handles I/O.
 func (e *ToolExecutor) Run() error {
 	defer e.cleanup()
+	e.startTime = time.Now()
 
 	// Validate working directory is absolute
 	if !filepath.IsAbs(e.req.Cwd) {
@@ -438,6 +452,14 @@ func (e *ToolExecutor) startProcess(env []string) error {
 	e.stdoutBuf = NewOutputBuffer("stdout", e.threshold, e.maxOutSz, e.sendMessage)
 	e.stderrBuf = NewOutputBuffer("stderr", e.threshold, e.maxOutSz, e.sendMessage)
 
+	// Wire up SHA256 hashers for audit output hash
+	if auditCfg := e.cfg.GetAuditConfig(); auditCfg != nil && auditCfg.Enabled && auditCfg.GetIncludeOutputHash() {
+		e.stdoutHash = sha256.New()
+		e.stderrHash = sha256.New()
+		e.stdoutBuf.SetTee(e.stdoutHash)
+		e.stderrBuf.SetTee(e.stderrHash)
+	}
+
 	// Start the process
 	if err := e.cmd.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
@@ -501,6 +523,7 @@ func (e *ToolExecutor) runIOLoop() error {
 			log.Printf("[WARN] Finalize output: %v", err)
 		}
 
+		e.emitAuditEntry(exitCode, false)
 		e.sendDone(exitCode, false)
 		return nil
 
@@ -812,7 +835,8 @@ func (e *ToolExecutor) handleTimeout() {
 		log.Printf("[WARN] Finalize output: %v", err)
 	}
 
-	// Send done with timeout flag
+	// Emit audit entry and send done with timeout flag
+	e.emitAuditEntry(-1, true)
 	e.sendDone(-1, true)
 }
 
@@ -848,6 +872,46 @@ func (e *ToolExecutor) cleanup() {
 		}
 	}
 
+}
+
+// emitAuditEntry writes an audit log entry for the completed execution.
+func (e *ToolExecutor) emitAuditEntry(exitCode int, timeout bool) {
+	if e.auditLogger == nil {
+		return
+	}
+	auditCfg := e.cfg.GetAuditConfig()
+	if auditCfg == nil || !auditCfg.Enabled {
+		return
+	}
+
+	entry := audit.Entry{
+		Timestamp:   e.startTime.UTC().Format(time.RFC3339),
+		Tool:        e.req.Tool,
+		Cwd:         e.req.Cwd,
+		CallerPID:   e.callerPID,
+		CallerExe:   e.callerExe,
+		ExitCode:    exitCode,
+		OutputBytes: e.stdoutBuf.Accumulated() + e.stderrBuf.Accumulated(),
+	}
+	if timeout {
+		entry.Timeout = true
+	}
+	if auditCfg.GetIncludeArgs() {
+		entry.Args = e.req.Args
+	}
+	if auditCfg.GetIncludeDuration() {
+		entry.DurationMs = time.Since(e.startTime).Milliseconds()
+	}
+	if auditCfg.GetIncludeOutputHash() && e.stdoutHash != nil {
+		combined := sha256.New()
+		combined.Write(e.stdoutHash.Sum(nil))
+		combined.Write(e.stderrHash.Sum(nil))
+		entry.OutputHash = fmt.Sprintf("sha256:%x", combined.Sum(nil))
+	}
+
+	if err := e.auditLogger.Log(entry); err != nil {
+		log.Printf("[ERROR] audit log: %v", err)
+	}
 }
 
 // NOTE: renderTemplate is defined in daemon.go and shared by this file
