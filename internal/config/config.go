@@ -993,6 +993,9 @@ func (c *Config) validateAudit() error {
 
 // GetAuditConfig returns the audit configuration.
 func (c *Config) GetAuditConfig() *AuditConfig {
+	if c == nil {
+		return nil
+	}
 	return c.Audit
 }
 
