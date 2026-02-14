@@ -3,10 +3,14 @@ package daemon
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"os"
+	"regexp"
+	"strings"
 	"testing"
 
+	"claw-wrap/internal/config"
 	"claw-wrap/internal/protocol"
 )
 
@@ -15,6 +19,36 @@ func mockSendFn(messages *[]interface{}) func(interface{}) error {
 	return func(msg interface{}) error {
 		*messages = append(*messages, msg)
 		return nil
+	}
+}
+
+func decodeInlineOutput(t *testing.T, msgs []interface{}) string {
+	t.Helper()
+
+	var out bytes.Buffer
+	for _, raw := range msgs {
+		msg, ok := raw.(protocol.ResponseMessage)
+		if !ok {
+			continue
+		}
+		if msg.Type != protocol.MsgTypeStdout && msg.Type != protocol.MsgTypeStderr {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(msg.Data)
+		if err != nil {
+			t.Fatalf("DecodeString() error = %v", err)
+		}
+		out.Write(decoded)
+	}
+
+	return out.String()
+}
+
+func compiledRedactRule(pattern, replace string) config.ToolRedactRule {
+	return config.ToolRedactRule{
+		Pattern:  pattern,
+		Replace:  replace,
+		Compiled: regexp.MustCompile(pattern),
 	}
 }
 
@@ -273,5 +307,108 @@ func TestOutputBuffer_Accumulated(t *testing.T) {
 	buf.Write([]byte(" world"))
 	if got := buf.Accumulated(); got != 11 {
 		t.Errorf("Accumulated() = %d, want 11", got)
+	}
+}
+
+func TestOutputBuffer_RedactOutput_Inline(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 1024, 0, mockSendFn(&msgs))
+	buf.SetRedactor(NewOutputRedactor([]config.ToolRedactRule{
+		compiledRedactRule(`ghp_[A-Za-z0-9]{36}`, "[REDACTED:github-pat]"),
+	}))
+
+	secret := "ghp_" + strings.Repeat("A", 36)
+	if err := buf.Write([]byte("token=" + secret + "\n")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if _, err := buf.Finalize(); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+
+	got := decodeInlineOutput(t, msgs)
+	if got != "token=[REDACTED:github-pat]\n" {
+		t.Fatalf("inline redaction output = %q", got)
+	}
+}
+
+func TestOutputBuffer_RedactOutput_FileMode(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 10, 0, mockSendFn(&msgs))
+	buf.SetRedactor(NewOutputRedactor([]config.ToolRedactRule{
+		compiledRedactRule(`sk-[A-Za-z0-9]{48}`, "[REDACTED:openai-key]"),
+	}))
+
+	secret := "sk-" + strings.Repeat("A", 48)
+	if err := buf.Write([]byte("api_key=" + secret + "\n")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	path, err := buf.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+	if path == "" {
+		t.Fatal("Finalize() returned empty path, expected file mode")
+	}
+	defer buf.Cleanup()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got := string(content); got != "api_key=[REDACTED:openai-key]\n" {
+		t.Fatalf("file redaction output = %q", got)
+	}
+}
+
+func TestOutputBuffer_RedactOutput_AcrossChunks(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 4096, 0, mockSendFn(&msgs))
+	buf.SetRedactor(NewOutputRedactor([]config.ToolRedactRule{
+		compiledRedactRule(`ghp_[A-Za-z0-9]{36}`, "[REDACTED:github-pat]"),
+	}))
+
+	part1 := "ghp_ABCDEFGHIJKLMN"
+	part2 := "OPQRSTUVWXYZ0123456789"
+
+	if err := buf.Write([]byte("token=" + part1)); err != nil {
+		t.Fatalf("first Write() error = %v", err)
+	}
+	if err := buf.Write([]byte(part2 + "\n")); err != nil {
+		t.Fatalf("second Write() error = %v", err)
+	}
+	if _, err := buf.Finalize(); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+
+	got := decodeInlineOutput(t, msgs)
+	if got != "token=[REDACTED:github-pat]\n" {
+		t.Fatalf("cross-chunk redaction output = %q", got)
+	}
+}
+
+func TestOutputBuffer_RedactOutput_NoLeakAtEmitBoundary(t *testing.T) {
+	var msgs []interface{}
+	buf := NewOutputBuffer("stdout", 4096, 0, mockSendFn(&msgs))
+	buf.SetRedactor(NewOutputRedactor([]config.ToolRedactRule{
+		compiledRedactRule(`ghp_[A-Za-z0-9]{36}`, "[REDACTED:github-pat]"),
+	}))
+
+	secret := "ghp_" + strings.Repeat("A", 36)
+	payload := strings.Repeat("A", 70) + secret + strings.Repeat("B", 80) + "\n"
+
+	if err := buf.Write([]byte(payload)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if _, err := buf.Finalize(); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+
+	got := decodeInlineOutput(t, msgs)
+	if strings.Contains(got, "ghp_") {
+		t.Fatalf("output leaked PAT marker: %q", got)
+	}
+	if strings.Count(got, "[REDACTED:github-pat]") != 1 {
+		t.Fatalf("output replacement count mismatch: %q", got)
 	}
 }

@@ -451,6 +451,10 @@ func (e *ToolExecutor) startProcess(env []string) error {
 	// Create output buffers
 	e.stdoutBuf = NewOutputBuffer("stdout", e.threshold, e.maxOutSz, e.sendMessage)
 	e.stderrBuf = NewOutputBuffer("stderr", e.threshold, e.maxOutSz, e.sendMessage)
+	if len(e.tool.RedactOutput) > 0 {
+		e.stdoutBuf.SetRedactor(NewOutputRedactor(e.tool.RedactOutput))
+		e.stderrBuf.SetRedactor(NewOutputRedactor(e.tool.RedactOutput))
+	}
 
 	// Wire up SHA256 hashers for audit output hash
 	if auditCfg := e.cfg.GetAuditConfig(); auditCfg != nil && auditCfg.Enabled && auditCfg.GetIncludeOutputHash() {

@@ -944,6 +944,13 @@ func sweepStaleTempDirs() {
 }
 
 func auditConfigChanged(old, new *config.Config) bool {
+	if old == nil && new == nil {
+		return false
+	}
+	if old == nil || new == nil {
+		return true
+	}
+
 	oa := old.GetAuditConfig()
 	na := new.GetAuditConfig()
 	if oa == nil && na == nil {

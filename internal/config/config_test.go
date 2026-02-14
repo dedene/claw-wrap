@@ -359,6 +359,121 @@ func TestLoad_AllowedArgsFromYAML(t *testing.T) {
 	}
 }
 
+func TestValidate_RedactOutput_ValidConfig(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				RedactOutput: []ToolRedactRule{
+					{Pattern: `ghp_[A-Za-z0-9]{36}`, Replace: "[REDACTED:github-pat]"},
+					{Pattern: `sk-[A-Za-z0-9]{48}`, Replace: "[REDACTED:openai-key]"},
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	rules := cfg.Tools["gh"].RedactOutput
+	if len(rules) != 2 {
+		t.Fatalf("RedactOutput len = %d, want 2", len(rules))
+	}
+	for i, r := range rules {
+		if r.Compiled == nil {
+			t.Errorf("RedactOutput[%d].Compiled is nil", i)
+		}
+	}
+}
+
+func TestValidate_RedactOutput_DefaultReplace(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				RedactOutput: []ToolRedactRule{
+					{Pattern: `ghp_[A-Za-z0-9]{36}`},
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	if got := cfg.Tools["gh"].RedactOutput[0].Replace; got != DefaultRedactReplacement {
+		t.Errorf("Replace = %q, want %q", got, DefaultRedactReplacement)
+	}
+}
+
+func TestValidate_RedactOutput_InvalidRegex(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				RedactOutput: []ToolRedactRule{
+					{Pattern: `[invalid(`},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want invalid redact_output regex error")
+	}
+	if !strings.Contains(err.Error(), "redact_output") {
+		t.Errorf("error = %q, want redact_output mention", err.Error())
+	}
+}
+
+func TestValidate_RedactOutput_RejectsEmptyPatternMatch(t *testing.T) {
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				RedactOutput: []ToolRedactRule{
+					{Pattern: `.*`},
+				},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want empty-string match rejection")
+	}
+	if !strings.Contains(err.Error(), "must not match empty string") {
+		t.Errorf("error = %q, want empty-string match rejection", err.Error())
+	}
+}
+
+func TestValidate_RedactOutput_TooManyRules(t *testing.T) {
+	rules := make([]ToolRedactRule, 0, maxRedactOutputRulesPerTool+1)
+	for i := 0; i < maxRedactOutputRulesPerTool+1; i++ {
+		rules = append(rules, ToolRedactRule{Pattern: `ghp_[A-Za-z0-9]{36}`})
+	}
+
+	cfg := Config{
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary:       "/usr/bin/gh",
+				RedactOutput: rules,
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want too many redact_output rules error")
+	}
+	if !strings.Contains(err.Error(), "too many redact_output rules") {
+		t.Errorf("error = %q, want rule-limit error", err.Error())
+	}
+}
+
 func TestValidate_MixedValidInvalid(t *testing.T) {
 	cfg := Config{
 		Tools: map[string]ToolDef{
@@ -1193,7 +1308,7 @@ func TestCompileHostPattern(t *testing.T) {
 		// Wildcard matches (suffix-anchored)
 		{"*.github.com", "api.github.com", true},
 		{"*.github.com", "raw.github.com", true},
-		{"*.github.com", "github.com", false},              // bare domain doesn't match *.
+		{"*.github.com", "github.com", false},                   // bare domain doesn't match *.
 		{"*.github.com", "evil.github.com.attacker.com", false}, // suffix-anchored
 
 		// Wildcard with subdomain attack prevention
