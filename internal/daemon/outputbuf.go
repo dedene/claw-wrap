@@ -27,7 +27,8 @@ type OutputBuffer struct {
 	tempFile      *os.File                // nil until threshold exceeded
 	tempPath      string                  // path for cleanup/response
 	sendFn        func(interface{}) error // sends length-prefixed message
-	tee           io.Writer              // optional; receives copy of all raw bytes
+	tee           io.Writer               // optional; receives copy of redacted bytes
+	redactor      *OutputRedactor
 	mu            sync.Mutex
 }
 
@@ -53,6 +54,21 @@ func (b *OutputBuffer) Write(data []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if len(data) == 0 {
+		return nil
+	}
+
+	if b.redactor != nil {
+		data = b.redactor.RedactChunk(data, false)
+		if len(data) == 0 {
+			return nil
+		}
+	}
+
+	return b.writeLocked(data)
+}
+
+func (b *OutputBuffer) writeLocked(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -131,6 +147,13 @@ func (b *OutputBuffer) Finalize() (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.redactor != nil {
+		tail := b.redactor.RedactChunk(nil, true)
+		if err := b.writeLocked(tail); err != nil {
+			return "", fmt.Errorf("flush redactor: %w", err)
+		}
+	}
+
 	if b.inlineMode {
 		// All data already sent as chunks
 		return "", nil
@@ -164,10 +187,16 @@ func (b *OutputBuffer) Cleanup() {
 	}
 }
 
-// SetTee sets an optional writer that receives a copy of all raw bytes.
+// SetTee sets an optional writer that receives a copy of all emitted bytes.
 // Must be called before any Write calls (before pumpers start).
 func (b *OutputBuffer) SetTee(w io.Writer) {
 	b.tee = w
+}
+
+// SetRedactor sets an optional streaming output redactor.
+// Must be called before any Write calls (before pumpers start).
+func (b *OutputBuffer) SetRedactor(r *OutputRedactor) {
+	b.redactor = r
 }
 
 // Accumulated returns the total bytes written so far.

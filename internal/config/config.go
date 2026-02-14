@@ -70,13 +70,13 @@ type SecurityConfig struct {
 
 // HTTPProxyConfig holds HTTP proxy configuration.
 type HTTPProxyConfig struct {
-	Enabled              bool          `yaml:"enabled"`
-	Listen               string        `yaml:"listen"`
-	RequireAuth          *bool         `yaml:"require_auth"` // default true
-	LogLevel             string        `yaml:"log_level"`    // none, errors, info, debug
-	CA                   CAConfig      `yaml:"ca"`
-	StripResponseHeaders []string      `yaml:"strip_response_headers"`
-	Routes               []ProxyRoute  `yaml:"routes"`
+	Enabled              bool         `yaml:"enabled"`
+	Listen               string       `yaml:"listen"`
+	RequireAuth          *bool        `yaml:"require_auth"` // default true
+	LogLevel             string       `yaml:"log_level"`    // none, errors, info, debug
+	CA                   CAConfig     `yaml:"ca"`
+	StripResponseHeaders []string     `yaml:"strip_response_headers"`
+	Routes               []ProxyRoute `yaml:"routes"`
 }
 
 // GetRequireAuth returns whether proxy auth is required (default: true).
@@ -171,15 +171,23 @@ type CredentialDef struct {
 
 // ToolDef defines a wrapped tool.
 type ToolDef struct {
-	Binary      string            `yaml:"binary"`
-	Timeout     string            `yaml:"timeout,omitempty"`
-	Env         map[string]string `yaml:"env,omitempty"`
-	ForcedEnv   map[string]string `yaml:"forced_env,omitempty"`
-	Mode        string            `yaml:"mode,omitempty"`          // "blocklist" (default) or "allowlist"
-	BlockedArgs []BlockedArg      `yaml:"blocked_args,omitempty"`
-	AllowedArgs []BlockedArg      `yaml:"allowed_args,omitempty"`
-	ConfigFile  *ConfigFileDef    `yaml:"config_file,omitempty"`
-	UseProxy    bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
+	Binary       string            `yaml:"binary"`
+	Timeout      string            `yaml:"timeout,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	ForcedEnv    map[string]string `yaml:"forced_env,omitempty"`
+	Mode         string            `yaml:"mode,omitempty"` // "blocklist" (default) or "allowlist"
+	BlockedArgs  []BlockedArg      `yaml:"blocked_args,omitempty"`
+	AllowedArgs  []BlockedArg      `yaml:"allowed_args,omitempty"`
+	RedactOutput []ToolRedactRule  `yaml:"redact_output,omitempty"`
+	ConfigFile   *ConfigFileDef    `yaml:"config_file,omitempty"`
+	UseProxy     bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
+}
+
+// ToolRedactRule defines an output redaction rule for tool stdout/stderr.
+type ToolRedactRule struct {
+	Pattern  string         `yaml:"pattern"`
+	Replace  string         `yaml:"replace,omitempty"`
+	Compiled *regexp.Regexp `yaml:"-"`
 }
 
 // BlockedArg defines a blocked argument pattern.
@@ -208,6 +216,13 @@ const (
 	ToolModeBlocklist = "blocklist"
 	// ToolModeAllowlist requires commands to match at least one allowed_args pattern.
 	ToolModeAllowlist = "allowlist"
+
+	// DefaultRedactReplacement is used when redact_output.replace is omitted.
+	DefaultRedactReplacement = "[REDACTED]"
+	// Limits to keep redact_output processing bounded.
+	maxRedactOutputRulesPerTool = 64
+	maxRedactPatternLength      = 1024
+	maxRedactReplaceLength      = 256
 )
 
 var (
@@ -359,6 +374,40 @@ func (c *Config) Validate() error {
 		t := c.Tools[toolName]
 		t.Mode = mode
 		c.Tools[toolName] = t
+
+		// Validate and compile redact_output regex patterns.
+		if len(tool.RedactOutput) > maxRedactOutputRulesPerTool {
+			return fmt.Errorf("tool %q: too many redact_output rules (%d > %d)", toolName, len(tool.RedactOutput), maxRedactOutputRulesPerTool)
+		}
+		for i, r := range tool.RedactOutput {
+			if strings.TrimSpace(r.Pattern) == "" {
+				return fmt.Errorf("tool %q: redact_output[%d]: pattern must not be empty", toolName, i)
+			}
+			pattern := r.Pattern
+			if len(pattern) > maxRedactPatternLength {
+				return fmt.Errorf("tool %q: redact_output[%d]: pattern too long (%d > %d)", toolName, i, len(pattern), maxRedactPatternLength)
+			}
+
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("tool %q: invalid redact_output pattern %q: %w", toolName, pattern, err)
+			}
+			if re.MatchString("") {
+				return fmt.Errorf("tool %q: redact_output[%d]: pattern must not match empty string", toolName, i)
+			}
+
+			replace := r.Replace
+			if replace == "" {
+				replace = DefaultRedactReplacement
+			}
+			if len(replace) > maxRedactReplaceLength {
+				return fmt.Errorf("tool %q: redact_output[%d]: replace too long (%d > %d)", toolName, i, len(replace), maxRedactReplaceLength)
+			}
+
+			c.Tools[toolName].RedactOutput[i].Pattern = pattern
+			c.Tools[toolName].RedactOutput[i].Replace = replace
+			c.Tools[toolName].RedactOutput[i].Compiled = re
+		}
 	}
 	// Validate HTTP proxy configuration
 	if c.HTTPProxy != nil && c.HTTPProxy.Enabled {
