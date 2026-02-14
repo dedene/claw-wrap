@@ -793,6 +793,31 @@ When both `blocked_args` and `allowed_args` are present (with `mode: allowlist`)
 
 This layered approach lets you allowlist broad categories while still blocking specific dangerous patterns within them.
 
+### `redact_output` (optional)
+
+List of regex rules used to sanitize tool output before it is returned to the client.
+
+Each rule supports:
+- `pattern` (required): regex pattern to match sensitive text
+- `replace` (optional): replacement string (defaults to `[REDACTED]`)
+
+```yaml
+tools:
+  gh:
+    binary: /usr/bin/gh
+    redact_output:
+      - pattern: "gh[pousr]_[A-Za-z0-9]{36}"
+        replace: "[GITHUB_TOKEN]"
+      - pattern: "(?i)(authorization:\\s*bearer\\s+)[^\\s]+"
+        replace: "${1}[REDACTED]"
+```
+
+Behavior notes:
+- Applies to both `stdout` and `stderr`
+- Works for both inline and file-backed output responses
+- Rules are applied in order
+- Invalid regex patterns are rejected during config validation
+
 ### `config_file` (optional)
 
 For tools that read config from a file instead of environment variables.

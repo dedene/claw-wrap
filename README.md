@@ -219,6 +219,26 @@ tools:
 
 The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited environment and set by the daemon.
 
+### Output redaction
+
+Sanitize sensitive values from tool output before it is streamed back to the client:
+
+```yaml
+tools:
+  gh:
+    binary: /home/linuxbrew/.linuxbrew/bin/gh
+    env:
+      GH_TOKEN: github-token
+    redact_output:
+      - pattern: "gh[pousr]_[A-Za-z0-9]{36}"
+        replace: "[GITHUB_TOKEN]"
+      - pattern: "(?i)(authorization:\\s*bearer\\s+)[^\\s]+"
+        replace: "${1}[REDACTED]"
+```
+
+If `replace` is omitted, claw-wrap uses `[REDACTED]`.
+See [Configuration Reference](docs/CONFIG.md#redact_output-optional) for full details.
+
 ## HTTP Proxy Mode
 
 For tools that make HTTP API calls, claw-wrap can act as a MITM proxy that injects credentials based on request host/path:
@@ -266,7 +286,7 @@ See [docs/SANDBOX.md](docs/SANDBOX.md) for the full guide — firejail profile, 
 ## Documentation
 
 - [Installation Guide](docs/INSTALL.md) — full setup with `pass`, systemd, and troubleshooting
-- [Configuration Reference](docs/CONFIG.md) — all options for credentials, tools, blocked args, config file injection
+- [Configuration Reference](docs/CONFIG.md) — all options for credentials, tools, blocked/allowed args, output redaction, config file injection
 - [HTTP Proxy Setup](docs/CONFIG.md#http-proxy-settings) — MITM proxy for API credential injection
 - [Sandbox Setup](docs/SANDBOX.md) — firejail (Linux) and nono (macOS) with verification steps
 - [Protocol Specification](docs/SPEC.md) — HMAC authentication, message framing, proxy protocol
