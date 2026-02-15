@@ -339,17 +339,19 @@ func warnVersionMismatch(daemonVersion string) {
 	}
 }
 
-// selfExePath returns the resolved absolute path of the running binary.
+// selfExePath returns the absolute path of the running binary without resolving symlinks.
+// This preserves stable paths (e.g., homebrew's bin/claw-wrap) rather than resolving
+// to versioned paths (e.g., Cellar/claw-wrap/x.y.z/bin/claw-wrap) that break on upgrade.
 func selfExePath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("detect executable path: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(exe)
+	abs, err := filepath.Abs(exe)
 	if err != nil {
-		return "", fmt.Errorf("resolve executable path: %w", err)
+		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
-	return resolved, nil
+	return filepath.Clean(abs), nil
 }
 
 func printHelp() {
