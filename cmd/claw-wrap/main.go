@@ -231,6 +231,14 @@ func runInstall() error {
 		installDir = "/usr/local/bin"
 	}
 
+	// Check if we need elevated privileges
+	if !canWriteDir(installDir) {
+		if isRoot() {
+			return fmt.Errorf("cannot write to %s even as root", installDir)
+		}
+		return reexecWithSudo()
+	}
+
 	fmt.Printf("Installing symlinks in %s -> %s\n", installDir, clawWrapPath)
 
 	var created, replaced, unchanged, failed, conflicts int
@@ -310,6 +318,18 @@ func removeInstallTarget(path string, info os.FileInfo) error {
 		return fmt.Errorf("%s exists and is a directory (will not remove)", path)
 	}
 	return os.Remove(path)
+}
+
+// canWriteDir checks if the current process can write to the given directory.
+func canWriteDir(dir string) bool {
+	testFile := filepath.Join(dir, ".claw-wrap-test")
+	f, err := os.Create(testFile)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	os.Remove(testFile)
+	return true
 }
 
 func symlinkPointsTo(linkPath, targetPath string) (bool, error) {
