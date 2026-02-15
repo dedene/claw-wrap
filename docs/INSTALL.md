@@ -108,20 +108,20 @@ sudo systemctl enable --now claw-wrap
 ## Create tool symlinks
 
 ```bash
-sudo $(which claw-wrap) install
+claw-wrap install
 ```
 
-This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wrap` binary. For example, `gh → /home/linuxbrew/.linuxbrew/bin/claw-wrap`. Use `$(which claw-wrap)` so sudo resolves YOUR binary (sudo's PATH may differ). To install symlinks in a different directory:
+This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wrap` binary (auto-elevates with sudo if needed). For example, `gh → /home/linuxbrew/.linuxbrew/bin/claw-wrap`. To install symlinks in a different directory:
 
 ```bash
-sudo claw-wrap install --install-dir /usr/local/bin
+claw-wrap install --install-dir /usr/local/bin
 ```
 
 If a target already exists, install now fails safe by default with a conflict error.
 Use `--force` only when you explicitly want to replace existing files/symlinks:
 
 ```bash
-sudo claw-wrap install --force
+claw-wrap install --force
 ```
 
 If a target is already a symlink to the current `claw-wrap` binary, install is idempotent and leaves it unchanged.
@@ -236,10 +236,10 @@ If `gh` already exists in the install directory (real `gh` binary), `claw-wrap i
 Typical fix:
 - Move the real binary: `sudo mv $(which gh) $(which gh)-real`
 - Update `binary:` in config to point to the new path
-- Re-run `sudo claw-wrap install`
+- Re-run `claw-wrap install`
 
 Or replace in-place (explicitly destructive):
-- `sudo claw-wrap install --force`
+- `claw-wrap install --force`
 
 ## Uninstallation
 

@@ -232,7 +232,11 @@ func runInstall() error {
 	}
 
 	// Check if we need elevated privileges
-	if !canWriteDir(installDir) {
+	canWrite, dirExists := canWriteDir(installDir)
+	if !dirExists {
+		return fmt.Errorf("install directory does not exist: %s", installDir)
+	}
+	if !canWrite {
 		if isRoot() {
 			return fmt.Errorf("cannot write to %s even as root", installDir)
 		}
@@ -321,15 +325,24 @@ func removeInstallTarget(path string, info os.FileInfo) error {
 }
 
 // canWriteDir checks if the current process can write to the given directory.
-func canWriteDir(dir string) bool {
+// Returns (canWrite, dirExists) to distinguish permission issues from missing directories.
+func canWriteDir(dir string) (bool, bool) {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return false, false
+	}
+	if err != nil || !info.IsDir() {
+		return false, false
+	}
+
 	testFile := filepath.Join(dir, ".claw-wrap-test")
 	f, err := os.Create(testFile)
 	if err != nil {
-		return false
+		return false, true // dir exists but can't write
 	}
 	f.Close()
 	os.Remove(testFile)
-	return true
+	return true, true
 }
 
 func symlinkPointsTo(linkPath, targetPath string) (bool, error) {
@@ -399,7 +412,7 @@ Commands:
 Examples:
   claw-wrap daemon         # Start daemon
   claw-wrap list           # Show tools
-  sudo claw-wrap install   # Create symlinks
+  claw-wrap install        # Create symlinks (auto-elevates with sudo if needed)
   bird whoami              # Run bird with credentials (via symlink)
 `, version, keychainLine)
 }
