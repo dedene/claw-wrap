@@ -412,3 +412,85 @@ func TestBuildEnvironment_UseProxyRequiresToken(t *testing.T) {
 		t.Fatalf("error = %v, want missing proxy auth token", err)
 	}
 }
+
+func TestBuildEnvironment_UnifiedEnvLiteralValue(t *testing.T) {
+	// Env value without credential refs is treated as literal
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{},
+		tool: &config.ToolDef{
+			Env: map[string]string{
+				"MY_LITERAL": "/usr/bin:/bin",
+			},
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "MY_LITERAL")
+	if !found {
+		t.Fatal("buildEnvironment() missing MY_LITERAL")
+	}
+	if val != "/usr/bin:/bin" {
+		t.Errorf("MY_LITERAL = %q, want %q", val, "/usr/bin:/bin")
+	}
+}
+
+func TestBuildEnvironment_UnifiedEnvCannotBeOverridden(t *testing.T) {
+	// All unified env entries are forced (cannot be overridden by request)
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{
+			Env: map[string]string{
+				"MY_VAR": "attacker-value",
+			},
+		},
+		tool: &config.ToolDef{
+			Env: map[string]string{
+				"MY_VAR": "admin-value",
+			},
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "MY_VAR")
+	if !found {
+		t.Fatal("buildEnvironment() missing MY_VAR")
+	}
+	if val != "admin-value" {
+		t.Errorf("MY_VAR = %q, want %q (unified env must win over request)", val, "admin-value")
+	}
+}
+
+func TestBuildEnvironment_UnifiedEnvAllowsDangerousVars(t *testing.T) {
+	// Admin-controlled env can set dangerous vars (like forced_env)
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{},
+		tool: &config.ToolDef{
+			Env: map[string]string{
+				"LD_PRELOAD": "/lib/admin-controlled.so",
+			},
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "LD_PRELOAD")
+	if !found {
+		t.Fatal("buildEnvironment() should allow LD_PRELOAD via unified env (admin-controlled)")
+	}
+	if val != "/lib/admin-controlled.so" {
+		t.Errorf("LD_PRELOAD = %q, want %q", val, "/lib/admin-controlled.so")
+	}
+}

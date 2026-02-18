@@ -211,22 +211,34 @@ tools:
 By default, blocked patterns run in `arg` mode (each argument is matched independently). Use
 `match: command` when a regex needs to span multiple args (for example `repo\\s+delete`).
 
-### Forced environment variables
+### Environment variables
 
-Variables that are always set and cannot be overridden by the agent:
+The `env` key supports three value types — all entries are admin-controlled and cannot be overridden by the agent:
 
 ```yaml
+credentials:
+  gog-keyring-password:
+    source: pass:gog/keyring
+  db-password:
+    source: op://vault/db/password
+
 tools:
   gog:
     binary: /home/linuxbrew/.linuxbrew/bin/gog
     env:
+      # Credential reference: value matches a defined credential name
       GOG_KEYRING_PASSWORD: gog-keyring-password
-    forced_env:
+
+      # Template interpolation: {{ name }} substituted inline
+      DATABASE_URL: "postgres://app:{{ db-password }}@localhost/mydb"
+
+      # Literal value: no credential refs, used as-is
       GOG_ENABLE_COMMANDS: 'gmail,calendar,drive,tasks,contacts,keep,time'
 ```
 
-The agent cannot change `GOG_ENABLE_COMMANDS` — it's stripped from inherited environment and set by
-the daemon.
+The agent cannot override any `env` entry — values are stripped from inherited environment and set by the daemon.
+
+> **Deprecated:** `forced_env` is deprecated. Use `env` instead — literal values (without credential refs) work the same way.
 
 ### Output redaction
 

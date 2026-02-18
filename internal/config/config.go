@@ -171,9 +171,11 @@ type CredentialDef struct {
 
 // ToolDef defines a wrapped tool.
 type ToolDef struct {
-	Binary       string            `yaml:"binary"`
-	Timeout      string            `yaml:"timeout,omitempty"`
-	Env          map[string]string `yaml:"env,omitempty"`
+	Binary   string            `yaml:"binary"`
+	Timeout  string            `yaml:"timeout,omitempty"`
+	Env      map[string]string `yaml:"env,omitempty"` // Unified env: credential refs, {{ interpolation }}, or literals
+	// Deprecated: Use Env instead. ForcedEnv values are always treated as literals.
+	// Will be removed in a future version.
 	ForcedEnv    map[string]string `yaml:"forced_env,omitempty"`
 	Mode         string            `yaml:"mode,omitempty"` // "blocklist" (default) or "allowlist"
 	BlockedArgs  []BlockedArg      `yaml:"blocked_args,omitempty"`
@@ -282,15 +284,24 @@ func (c *Config) Validate() error {
 			log.Printf("[WARN] tool %q: binary %q not found on disk: %v", toolName, tool.Binary, err)
 		}
 
-		for envVar, credName := range tool.Env {
+		// Build credential names set for validation
+		credNames := CredentialNamesSet(c.Credentials)
+
+		// Validate env entries (unified: credential refs, {{ interpolation }}, or literals)
+		for envVar, value := range tool.Env {
 			if !envVarNameRegex.MatchString(envVar) {
 				return fmt.Errorf("tool %q: invalid env var name %q", toolName, envVar)
 			}
-			if _, ok := c.Credentials[credName]; !ok {
-				return fmt.Errorf("tool %q: references undefined credential %q", toolName, credName)
+			// Validate any credential references in the value
+			if missing := ValidateEnvRefs(value, credNames); len(missing) > 0 {
+				return fmt.Errorf("tool %q: env %q references undefined credential(s): %v", toolName, envVar, missing)
 			}
 		}
 
+		// Validate forced_env (deprecated) - emit warning and validate var names
+		if len(tool.ForcedEnv) > 0 {
+			log.Printf("[WARN] tool %q: forced_env is deprecated, use env instead (values without credential refs are treated as literals)", toolName)
+		}
 		for envVar := range tool.ForcedEnv {
 			if !envVarNameRegex.MatchString(envVar) {
 				return fmt.Errorf("tool %q: invalid forced_env var name %q", toolName, envVar)
