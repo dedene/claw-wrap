@@ -70,13 +70,6 @@ func Interpolate(value string, resolver func(name string) (string, error)) (stri
 	return result, nil
 }
 
-// IsExactCredentialRef returns true if value is exactly a credential name (no template syntax).
-// Used to detect direct credential references vs interpolation vs literal values.
-func IsExactCredentialRef(value string, credentialNames map[string]struct{}) bool {
-	_, exists := credentialNames[value]
-	return exists
-}
-
 // ClassifyEnvValue determines how an env value should be resolved:
 //   - "credential": value is an exact credential name → fetch entire value
 //   - "interpolate": value contains {{ refs }} → interpolate
