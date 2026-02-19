@@ -276,7 +276,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 			return "", err
 		}
 		if value == "" {
-			return "", fmt.Errorf("empty value")
+			return "", fmt.Errorf("credential %s returned empty value", name)
 		}
 		return value, nil
 	}

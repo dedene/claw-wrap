@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"regexp"
-	"strings"
 )
 
 // credentialNameRe matches valid credential names in {{ name }} templates.
@@ -144,8 +143,3 @@ func CredentialNamesSet(credentials map[string]CredentialDef) map[string]struct{
 	return names
 }
 
-// NormalizeCredentialRef trims whitespace from a credential ref.
-// "{{  foo  }}" → "foo"
-func NormalizeCredentialRef(ref string) string {
-	return strings.TrimSpace(ref)
-}
