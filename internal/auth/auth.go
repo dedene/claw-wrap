@@ -161,6 +161,14 @@ func ComputeHMAC(secret []byte, timestamp, tool, cwd string, args []string, nonc
 // timestamp + tool + json(args) + cwd + json(env canonical) + nonce.
 // Fields are separated by newlines to prevent boundary confusion.
 func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, nonce string) (string, error) {
+	return ComputeHMACWithPTY(secret, timestamp, tool, cwd, args, env, nonce, false)
+}
+
+// ComputeHMACWithPTY computes an HMAC-SHA256 signature including the PTY flag.
+// Message format: timestamp + tool + json(args) + cwd + json(env canonical) + nonce + ptyFlag
+// where ptyFlag is "1" if usePTY is true, "0" otherwise.
+// Fields are separated by newlines to prevent boundary confusion.
+func ComputeHMACWithPTY(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, nonce string, usePTY bool) (string, error) {
 	// Serialize args as JSON for consistent encoding
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
@@ -172,8 +180,14 @@ func ComputeHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []strin
 		return "", fmt.Errorf("failed to marshal env: %w", err)
 	}
 
+	// PTY flag as string for consistent encoding
+	ptyFlag := "0"
+	if usePTY {
+		ptyFlag = "1"
+	}
+
 	// Build the message to sign — fields separated by \n to prevent boundary confusion
-	message := timestamp + "\n" + tool + "\n" + string(argsJSON) + "\n" + cwd + "\n" + envJSON + "\n" + nonce
+	message := timestamp + "\n" + tool + "\n" + string(argsJSON) + "\n" + cwd + "\n" + envJSON + "\n" + nonce + "\n" + ptyFlag
 
 	// Compute HMAC-SHA256
 	mac := hmac.New(sha256.New, secret)
@@ -193,14 +207,22 @@ func VerifyHMAC(secret []byte, timestamp, tool, cwd string, args []string, nonce
 }
 
 // VerifyHMACWithEnv verifies the provided HMAC signature with env included.
+// For backward compatibility, assumes usePTY=false.
 func VerifyHMACWithEnv(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, nonce, providedHMAC string) error {
+	return VerifyHMACWithPTY(secret, timestamp, tool, cwd, args, env, nonce, false, providedHMAC)
+}
+
+// VerifyHMACWithPTY verifies the provided HMAC signature with PTY flag included.
+// It uses constant-time comparison to prevent timing attacks and validates
+// that the timestamp is within the allowed freshness window.
+func VerifyHMACWithPTY(secret []byte, timestamp, tool, cwd string, args []string, env map[string]string, nonce string, usePTY bool, providedHMAC string) error {
 	// First validate timestamp freshness
 	if err := ValidateTimestamp(timestamp); err != nil {
 		return err
 	}
 
 	// Compute expected HMAC
-	expectedHMAC, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, env, nonce)
+	expectedHMAC, err := ComputeHMACWithPTY(secret, timestamp, tool, cwd, args, env, nonce, usePTY)
 	if err != nil {
 		return fmt.Errorf("failed to compute expected HMAC: %w", err)
 	}

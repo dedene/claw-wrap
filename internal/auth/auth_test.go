@@ -635,3 +635,82 @@ func TestLoadSecret_RejectsSymlink(t *testing.T) {
 		t.Errorf("LoadSecret() error = %v, want symlink-related error", err)
 	}
 }
+
+func TestComputeHMACWithPTY_DifferentPTYFlag(t *testing.T) {
+	// PTY flag should change the HMAC signature
+	secret := []byte("test-secret-key-for-hmac-testing")
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	tool := "test-tool"
+	cwd := "/home/user"
+	args := []string{"arg1", "arg2"}
+	env := map[string]string{"FOO": "bar"}
+	nonce := "dGVzdC1ub25jZS0xMjM0" // base64("test-nonce-1234")
+
+	// Compute HMAC with PTY false
+	hmacNoPTY, err := ComputeHMACWithPTY(secret, timestamp, tool, cwd, args, env, nonce, false)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithPTY(usePTY=false) error = %v", err)
+	}
+
+	// Compute HMAC with PTY true
+	hmacWithPTY, err := ComputeHMACWithPTY(secret, timestamp, tool, cwd, args, env, nonce, true)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithPTY(usePTY=true) error = %v", err)
+	}
+
+	// Signatures must be different
+	if hmacNoPTY == hmacWithPTY {
+		t.Error("HMACs should differ based on PTY flag")
+	}
+}
+
+func TestVerifyHMACWithPTY_PTYFlagMismatch(t *testing.T) {
+	// HMAC computed with usePTY=true should fail verification with usePTY=false
+	secret := []byte("test-secret-key-for-hmac-testing")
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	tool := "test-tool"
+	cwd := "/home/user"
+	args := []string{"arg1"}
+	nonce := "dGVzdC1ub25jZS0xMjM0"
+
+	// Compute with PTY=true
+	sig, err := ComputeHMACWithPTY(secret, timestamp, tool, cwd, args, nil, nonce, true)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithPTY() error = %v", err)
+	}
+
+	// Verify with PTY=true should pass
+	if err := VerifyHMACWithPTY(secret, timestamp, tool, cwd, args, nil, nonce, true, sig); err != nil {
+		t.Errorf("VerifyHMACWithPTY(usePTY=true) rejected valid signature: %v", err)
+	}
+
+	// Verify with PTY=false should fail
+	if err := VerifyHMACWithPTY(secret, timestamp, tool, cwd, args, nil, nonce, false, sig); err == nil {
+		t.Error("VerifyHMACWithPTY(usePTY=false) should reject signature computed with usePTY=true")
+	}
+}
+
+func TestComputeHMACWithEnv_BackwardCompatibleWithPTYFalse(t *testing.T) {
+	// ComputeHMACWithEnv should produce same result as ComputeHMACWithPTY(usePTY=false)
+	secret := []byte("test-secret-key-for-hmac-testing")
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	tool := "test-tool"
+	cwd := "/home/user"
+	args := []string{"arg1", "arg2"}
+	env := map[string]string{"VAR1": "value1"}
+	nonce := "dGVzdC1ub25jZS0xMjM0"
+
+	hmacEnv, err := ComputeHMACWithEnv(secret, timestamp, tool, cwd, args, env, nonce)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithEnv() error = %v", err)
+	}
+
+	hmacPTYFalse, err := ComputeHMACWithPTY(secret, timestamp, tool, cwd, args, env, nonce, false)
+	if err != nil {
+		t.Fatalf("ComputeHMACWithPTY() error = %v", err)
+	}
+
+	if hmacEnv != hmacPTYFalse {
+		t.Error("ComputeHMACWithEnv should equal ComputeHMACWithPTY(usePTY=false) for backward compatibility")
+	}
+}
