@@ -135,4 +135,3 @@ func CredentialNamesSet(credentials map[string]CredentialDef) map[string]struct{
 	}
 	return names
 }
-
