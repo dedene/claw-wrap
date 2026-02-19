@@ -806,21 +806,40 @@ func TestValidate_EmptyBinary(t *testing.T) {
 }
 
 func TestValidate_MissingCredentialRef(t *testing.T) {
+	// With unified env, plain values are literals (allowed).
+	// Template refs {{ name }} must reference defined credentials.
 	cfg := &Config{
 		Credentials: map[string]CredentialDef{}, // no credentials defined
 		Tools: map[string]ToolDef{
 			"gh": {
 				Binary: "/usr/bin/gh",
-				Env:    map[string]string{"GH_TOKEN": "nonexistent-cred"},
+				Env:    map[string]string{"GH_TOKEN": "{{ nonexistent-cred }}"},
 			},
 		},
 	}
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("Validate() should reject undefined credential ref")
+		t.Fatal("Validate() should reject undefined credential ref in template")
 	}
 	if !strings.Contains(err.Error(), "undefined credential") {
 		t.Errorf("error = %v, want 'undefined credential'", err)
+	}
+}
+
+func TestValidate_LiteralEnvValue(t *testing.T) {
+	// Plain values without {{ refs }} are treated as literals (allowed).
+	cfg := &Config{
+		Credentials: map[string]CredentialDef{},
+		Tools: map[string]ToolDef{
+			"gh": {
+				Binary: "/usr/bin/gh",
+				Env:    map[string]string{"PATH": "/usr/bin:/bin"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Errorf("Validate() unexpected error for literal env value: %v", err)
 	}
 }
 

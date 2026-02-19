@@ -259,11 +259,12 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		envMap["TERM"] = "dumb"
 	}
 
-	// Add credentials from tool.Env
-	for envVar, credName := range e.tool.Env {
-		credDef, ok := e.cfg.Credentials[credName]
+	// Build credential names set and resolver for unified env handling
+	credNames := config.CredentialNamesSet(e.cfg.Credentials)
+	credResolver := func(name string) (string, error) {
+		credDef, ok := e.cfg.Credentials[name]
 		if !ok {
-			return nil, fmt.Errorf("missing credential config: %s", credName)
+			return "", fmt.Errorf("undefined credential: %s", name)
 		}
 		value, err := credentials.Fetch(
 			credDef.Source,
@@ -272,16 +273,28 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 			credentials.WithBWBinary(e.cfg.GetBWBinary()),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("fetch credential %s: %w", credName, err)
+			return "", err
 		}
 		if value == "" {
-			return nil, fmt.Errorf("empty credential: %s", credName)
+			return "", fmt.Errorf("credential %s returned empty value", name)
 		}
-		envMap[envVar] = value
+		return value, nil
 	}
 
-	// Add forced_env (these cannot be overridden)
+	// All env entries are admin-controlled (forced), cannot be overridden by request
 	forcedKeys := make(map[string]bool)
+
+	// Process unified env: credential refs, {{ interpolation }}, or literals
+	for envVar, value := range e.tool.Env {
+		resolved, err := config.ResolveEnvValue(value, credNames, credResolver)
+		if err != nil {
+			return nil, fmt.Errorf("env %s: %w", envVar, err)
+		}
+		envMap[envVar] = resolved
+		forcedKeys[envVar] = true
+	}
+
+	// Process deprecated forced_env (always treated as literals)
 	for k, v := range e.tool.ForcedEnv {
 		envMap[k] = v
 		forcedKeys[k] = true
