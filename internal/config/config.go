@@ -90,6 +90,9 @@ func (c *HTTPProxyConfig) GetRequireAuth() bool {
 // CAConfig holds CA certificate configuration for MITM proxy.
 type CAConfig struct {
 	Path         string `yaml:"path"`
+	CertFile     string `yaml:"cert_file"` // default "ca.crt"
+	KeyFile      string `yaml:"key_file"`  // default "ca.key"
+	External     bool   `yaml:"external"`  // external management mode (cert-manager, etc.)
 	ValidityDays int    `yaml:"validity_days"`
 	Organization string `yaml:"organization"`
 }
@@ -171,9 +174,9 @@ type CredentialDef struct {
 
 // ToolDef defines a wrapped tool.
 type ToolDef struct {
-	Binary   string            `yaml:"binary"`
-	Timeout  string            `yaml:"timeout,omitempty"`
-	Env      map[string]string `yaml:"env,omitempty"` // Unified env: credential refs, {{ interpolation }}, or literals
+	Binary  string            `yaml:"binary"`
+	Timeout string            `yaml:"timeout,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty"` // Unified env: credential refs, {{ interpolation }}, or literals
 	// Deprecated: Use Env instead. ForcedEnv values are always treated as literals.
 	// Will be removed in a future version.
 	ForcedEnv    map[string]string `yaml:"forced_env,omitempty"`
@@ -457,6 +460,14 @@ func (c *Config) validateHTTPProxy() error {
 		return fmt.Errorf("ca.validity_days must be non-negative")
 	}
 
+	// Validate CA filenames (prevent path traversal)
+	if err := validateCAFilename(cfg.CA.CertFile, "cert_file"); err != nil {
+		return err
+	}
+	if err := validateCAFilename(cfg.CA.KeyFile, "key_file"); err != nil {
+		return err
+	}
+
 	// Validate and compile routes
 	for i := range cfg.Routes {
 		route := &cfg.Routes[i]
@@ -653,6 +664,31 @@ func validateSafeRelativePath(value string, allowNested bool) error {
 		return fmt.Errorf("must be normalized")
 	}
 
+	return nil
+}
+
+// validateCAFilename ensures a CA filename is a simple basename without path traversal.
+// Empty values are allowed (defaults apply).
+func validateCAFilename(filename, field string) error {
+	if filename == "" {
+		return nil // Defaults apply
+	}
+	// Must be a simple basename (no directory components)
+	if strings.ContainsAny(filename, "/\\") {
+		return fmt.Errorf("ca.%s: must be a filename, not a path", field)
+	}
+	if filename == "." || filename == ".." {
+		return fmt.Errorf("ca.%s: invalid filename %q", field, filename)
+	}
+	if strings.ContainsRune(filename, '\x00') {
+		return fmt.Errorf("ca.%s: contains NUL byte", field)
+	}
+	// Reject control characters (log injection prevention)
+	for _, r := range filename {
+		if r < 32 || r == 127 {
+			return fmt.Errorf("ca.%s: contains control character", field)
+		}
+	}
 	return nil
 }
 
@@ -967,6 +1003,30 @@ func (c *Config) GetHTTPProxyRequireAuth() bool {
 		return true // default
 	}
 	return c.HTTPProxy.GetRequireAuth()
+}
+
+// GetHTTPProxyCACertFile returns the CA certificate filename (default "ca.crt").
+func (c *Config) GetHTTPProxyCACertFile() string {
+	if c.HTTPProxy == nil || c.HTTPProxy.CA.CertFile == "" {
+		return "ca.crt"
+	}
+	return c.HTTPProxy.CA.CertFile
+}
+
+// GetHTTPProxyCAKeyFile returns the CA key filename (default "ca.key").
+func (c *Config) GetHTTPProxyCAKeyFile() string {
+	if c.HTTPProxy == nil || c.HTTPProxy.CA.KeyFile == "" {
+		return "ca.key"
+	}
+	return c.HTTPProxy.CA.KeyFile
+}
+
+// GetHTTPProxyCAExternal returns whether the CA is externally managed.
+func (c *Config) GetHTTPProxyCAExternal() bool {
+	if c.HTTPProxy == nil {
+		return false
+	}
+	return c.HTTPProxy.CA.External
 }
 
 // GetTimeout returns the tool-specific timeout or falls back to the global default.

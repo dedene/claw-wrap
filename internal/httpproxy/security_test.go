@@ -137,7 +137,7 @@ func TestSanitizeForLog(t *testing.T) {
 		{"normal log message", "normal log message"},
 		{"token=abc123", "token=[REDACTED]"},
 		{"Token: abc123", "Token=[REDACTED]"},
-		{"Authorization: Bearer-abc", "Authorization=[REDACTED]"},     // single word with dash
+		{"Authorization: Bearer-abc", "Authorization=[REDACTED]"}, // single word with dash
 		{"api_key=secret123", "api_key=[REDACTED]"},
 		{"API-KEY: xyz", "API-KEY=[REDACTED]"},
 		{"password: hunter2", "password=[REDACTED]"},

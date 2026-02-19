@@ -150,8 +150,14 @@ func (p *Proxy) Start(addr string) error {
 		return fmt.Errorf("setup MITM: %w", err)
 	}
 
+	// Start file watcher for external CA hot-reload
+	if err := p.ca.StartWatcher(); err != nil {
+		return fmt.Errorf("start CA watcher: %w", err)
+	}
+
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
+		p.ca.StopWatcher() // Clean up watcher if listen fails
 		return fmt.Errorf("listen: %w", err)
 	}
 	p.listener = listener
@@ -201,6 +207,9 @@ func (p *Proxy) Stop() error {
 	var err error
 	p.stopOnce.Do(func() {
 		close(p.shutdownCh)
+
+		// Stop CA file watcher
+		p.ca.StopWatcher()
 
 		if p.listener != nil {
 			if closeErr := p.listener.Close(); closeErr != nil {
