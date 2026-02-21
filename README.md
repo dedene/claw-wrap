@@ -41,7 +41,7 @@ You can also block dangerous commands server-side — the agent can `gh repo lis
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ SANDBOX (firejail)                                      │
+│ SANDBOX                                                  │
 │                                                         │
 │  agent calls "gh repo list"                             │
 │         ↓                                               │
@@ -58,7 +58,7 @@ You can also block dangerous commands server-side — the agent can `gh repo lis
 │ claw-wrap daemon (outside sandbox)                      │
 │  1. Verifies HMAC signature + timestamp                 │
 │  2. Checks args against blocked patterns                │
-│  3. Fetches GH_TOKEN from pass (password store)         │
+│  3. Fetches GH_TOKEN from credential backend            │
 │  4. Spawns real gh binary with token in environment     │
 │  5. Streams stdout/stderr back through socket           │
 │                                                         │
@@ -93,8 +93,8 @@ This example sets up `gh` (GitHub CLI) as a proxied tool.
 
 ### Prerequisites
 
-- Linux with systemd
-- [pass](https://www.passwordstore.org/) (password store) with GPG configured
+- Linux with systemd or macOS with launchd
+- A credential backend — [pass](https://www.passwordstore.org/), 1Password CLI, Bitwarden CLI, macOS Keychain, or age
 - `gh` installed somewhere (e.g. via Homebrew: `brew install gh`)
 
 ### 1. Install claw-wrap
@@ -128,20 +128,6 @@ pass insert cli/github/token
 Create `/etc/openclaw/wrappers.yaml`:
 
 ```yaml
-proxy:
-  timeout: 300s
-  inline_threshold: 1MB
-  hmac_secret_file: /run/openclaw/auth
-  max_connections: 64
-  read_header_timeout: 3s
-  read_message_timeout: 15s
-  max_stdin_message_size: 1MB
-  replay_cache_ttl: 2m
-  replay_cache_max_entries: 10000
-  credential_cache_ttl: 0s
-  max_output_size: 100MB
-  max_connection_lifetime: 30m
-
 credentials:
   github-token:
     source: pass:cli/github/token
@@ -153,7 +139,11 @@ tools:
       GH_TOKEN: github-token
 ```
 
+See [Configuration Reference](docs/CONFIG.md) for proxy tuning, output limits, and connection settings.
+
 ### 4. Start the daemon
+
+**Linux (systemd):**
 
 ```bash
 sudo cp init/claw-wrap.service /etc/systemd/system/
@@ -163,6 +153,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now claw-wrap
 ```
 
+**macOS (launchd):**
+
+```bash
+cp init/com.openclaw.claw-wrap.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.openclaw.claw-wrap.plist
+```
+
 ### 5. Create the symlink
 
 ```bash
@@ -170,7 +167,7 @@ claw-wrap install
 ```
 
 This creates symlinks in `/usr/local/bin` pointing to the auto-detected `claw-wrap` binary
-(auto-elevates with sudo if needed). Override the symlink directory with `--install-dir`:
+(auto-elevates with sudo if needed). Override with `--install-dir /other/path`.
 
 ### 6. Verify
 
@@ -179,6 +176,19 @@ claw-wrap list      # Should show gh
 claw-wrap check     # Should show credentials OK (run from host/admin context)
 gh repo list        # Should work — using proxied credentials
 ```
+
+## Credential Backends
+
+| Backend | Format | Example |
+| --- | --- | --- |
+| [pass](https://www.passwordstore.org/) | `pass:path` | `pass:cli/github/token` |
+| [1Password CLI](https://developer.1password.com/docs/cli/) | `op://vault/item/field` | `op://dev/github/token` |
+| [Bitwarden CLI](https://bitwarden.com/help/cli/) | `bw:item-uuid` | `bw:a1b2c3d4` |
+| macOS Keychain | `keychain:service` | `keychain:github-token` |
+| [age](https://age-encryption.org/) | `age:/path/file.age` | `age:/etc/secrets/token.age` |
+| Environment | `env:VAR` | `env:GH_TOKEN` |
+
+All backends support `| .jq_expr` suffix for JSON field extraction (e.g. `op://vault/item/field | .token`).
 
 ## Safety Controls
 
@@ -351,11 +361,10 @@ make clean    # Remove build artifacts
 
 ## Requirements
 
-- Go 1.21+ (building from source)
-- Linux with systemd (or macOS with launchd)
-- `pass` (password-store) + GPG
-- [firejail](https://firejail.wordpress.com/) (Linux) or [nono](https://github.com/lukehinds/nono)
-  (macOS)
+- Go 1.24+ (building from source)
+- Linux with systemd or macOS with launchd
+- A supported credential backend (see [table above](#credential-backends))
+- Optional: [firejail](https://firejail.wordpress.com/) (Linux) or [nono](https://github.com/lukehinds/nono) (macOS) for sandbox isolation
 
 ## License
 
