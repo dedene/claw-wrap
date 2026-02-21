@@ -27,6 +27,7 @@ import (
 	"claw-wrap/internal/httpproxy"
 	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
+	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
 )
 
@@ -60,6 +61,12 @@ type Daemon struct {
 	proxyAuthToken     string
 	proxyAuthTokenPath string
 	auditLogger        audit.Logger
+
+	configWatcher     *fsnotify.Watcher
+	configWatcherWg   sync.WaitGroup
+	configWatcherMu   sync.Mutex
+	configWatcherInit bool
+	configStopCh      chan struct{}
 }
 
 var (
@@ -210,6 +217,11 @@ func (d *Daemon) Run() error {
 		// Continue without HTTP proxy - it's optional
 	}
 
+	// Start config file watcher (non-fatal; SIGHUP still works as fallback)
+	if err := d.startConfigWatcher(); err != nil {
+		log.Printf("[WARN] Config file watcher failed to start: %v", err)
+	}
+
 	go d.logMetricsLoop()
 	log.Printf("[INFO] Secrets daemon listening on %s", d.socketPath)
 
@@ -226,6 +238,7 @@ func (d *Daemon) Run() error {
 				continue
 			}
 			log.Println("[INFO] Shutting down...")
+			d.stopConfigWatcher()
 			if err := d.stopHTTPProxy(); err != nil {
 				log.Printf("[WARN] HTTP proxy stop: %v", err)
 			}
@@ -339,6 +352,118 @@ func (d *Daemon) reloadConfig() error {
 	setCredentialCacheTTLFunc(newCfg.GetCredentialCacheTTL())
 
 	return nil
+}
+
+// configWatchDebounce is the delay before reloading config after a file change.
+// Editors often emit multiple events per save (rename+create, write+chmod).
+const configWatchDebounce = 500 * time.Millisecond
+
+// startConfigWatcher starts an fsnotify watcher on the config file directory.
+// It calls reloadConfig when the config file changes. Non-fatal if it fails.
+func (d *Daemon) startConfigWatcher() error {
+	d.configWatcherMu.Lock()
+	defer d.configWatcherMu.Unlock()
+
+	if d.configWatcherInit {
+		return nil // Already running
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("create config watcher: %w", err)
+	}
+
+	dir := filepath.Dir(d.configPath)
+	if err := watcher.Add(dir); err != nil {
+		watcher.Close()
+		return fmt.Errorf("watch config directory %s: %w", dir, err)
+	}
+
+	d.configWatcher = watcher
+	d.configStopCh = make(chan struct{})
+	d.configWatcherInit = true
+
+	stopCh := d.configStopCh
+	events := watcher.Events
+	errors := watcher.Errors
+
+	d.configWatcherWg.Add(1)
+	go d.configWatchLoop(stopCh, events, errors)
+
+	log.Printf("[INFO] Config file watcher started for %s", dir)
+	return nil
+}
+
+// configWatchLoop watches for config file changes and triggers reload with debounce.
+func (d *Daemon) configWatchLoop(stopCh <-chan struct{}, events <-chan fsnotify.Event, errs <-chan error) {
+	defer d.configWatcherWg.Done()
+
+	configFile := filepath.Base(d.configPath)
+
+	// Create timer in stopped state
+	debounce := time.NewTimer(0)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
+	defer debounce.Stop()
+
+	for {
+		select {
+		case <-stopCh:
+			return
+
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+
+			if filepath.Base(event.Name) != configFile {
+				continue
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Chmod|fsnotify.Rename) == 0 {
+				continue
+			}
+
+			// Reset debounce timer — coalesces rapid events into one reload
+			debounce.Reset(configWatchDebounce)
+
+		case <-debounce.C:
+			if err := d.reloadConfig(); err != nil {
+				log.Printf("[ERROR] Config reload failed: %v (keeping previous config)", err)
+			} else {
+				log.Printf("[INFO] Config reloaded successfully (file change detected)")
+			}
+
+		case err, ok := <-errs:
+			if !ok {
+				return
+			}
+			log.Printf("[WARN] Config watcher error: %v", err)
+		}
+	}
+}
+
+// stopConfigWatcher stops the config file watcher. Safe to call multiple times
+// and concurrently (protected by configWatcherMu).
+func (d *Daemon) stopConfigWatcher() {
+	d.configWatcherMu.Lock()
+	if !d.configWatcherInit {
+		d.configWatcherMu.Unlock()
+		return
+	}
+
+	close(d.configStopCh)
+	d.configStopCh = nil
+	d.configWatcherInit = false
+	watcher := d.configWatcher
+	d.configWatcher = nil
+	d.configWatcherMu.Unlock() // Release before Wait to avoid deadlock with watchLoop
+
+	d.configWatcherWg.Wait()
+
+	if watcher != nil {
+		watcher.Close()
+	}
 }
 
 // startHTTPProxy starts the HTTP proxy if enabled in config.
