@@ -175,6 +175,21 @@ sudo make install
 sudo systemctl restart claw-wrap
 ```
 
+### Unauthorized caller after Homebrew upgrade
+
+> **Fixed in versions after v0.4.4**: The daemon now stores the stable symlink path
+> alongside the resolved binary path, so upgrades are handled automatically.
+
+On older versions, `brew upgrade claw-wrap` causes wrappers to fail with `unauthorized caller`
+because the daemon caches the versioned Cellar path at startup (e.g. `.../Cellar/claw-wrap/0.4.3/...`)
+and Homebrew changes it on each version.
+
+Restart the daemon after upgrading:
+
+```bash
+sudo systemctl restart claw-wrap
+```
+
 ### Tools crash or fail after systemd hardening
 
 The daemon spawns tool processes that inherit all systemd security restrictions.

@@ -102,11 +102,26 @@ func WithVersion(v string) Option {
 
 // New creates a new daemon with the given options.
 func New(opts ...Option) *Daemon {
-	// Auto-detect own binary path; fall back to common default.
+	// Build allowed binary paths: resolved exe + invocation path.
+	// The invocation path (os.Args[0]) is often a stable symlink that
+	// survives package-manager upgrades (e.g. Homebrew Cellar versioned
+	// paths change, but the bin/ symlink stays). normalizeExecutablePath
+	// re-resolves symlinks at check time, so a stored symlink adapts to
+	// new versions without a daemon restart.
 	selfPath := "/usr/local/bin/claw-wrap"
 	if exe, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 			selfPath = resolved
+		}
+	}
+	allowed := []string{selfPath}
+	if len(os.Args) > 0 {
+		arg0 := os.Args[0]
+		if abs, err := filepath.Abs(arg0); err == nil {
+			arg0 = abs
+		}
+		if arg0 != selfPath {
+			allowed = append(allowed, arg0)
 		}
 	}
 
@@ -114,7 +129,7 @@ func New(opts ...Option) *Daemon {
 		socketPath:         DefaultSocketPath,
 		configPath:         config.DefaultConfigPath,
 		allowedUID:         uint32(os.Getuid()),
-		allowedBinaries:    []string{selfPath},
+		allowedBinaries:    allowed,
 		metrics:            newSecurityMetrics(),
 		proxyAuthTokenPath: paths.ProxyAuthTokenPath(),
 	}
