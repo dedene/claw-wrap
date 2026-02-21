@@ -261,10 +261,11 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		envMap["USER"] = u.Username
 	}
 
-	if term := os.Getenv("TERM"); term != "" {
-		envMap["TERM"] = term
-	} else {
-		envMap["TERM"] = "dumb"
+	if termValue := os.Getenv("TERM"); termValue != "" {
+		envMap["TERM"] = termValue
+	}
+	if colorTerm := os.Getenv("COLORTERM"); colorTerm != "" {
+		envMap["COLORTERM"] = colorTerm
 	}
 
 	// Build credential names set and resolver for unified env handling
@@ -309,6 +310,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 	}
 
 	// Add request env (cannot override forced_env, blocked dangerous vars)
+	termFromReq := false
 	for k, v := range e.req.Env {
 		if isDeniedEnvVar(k) {
 			log.Printf("[WARN] Request attempted to set denied env var %q, ignoring", k)
@@ -319,6 +321,23 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 			continue
 		}
 		envMap[k] = v
+		if k == "TERM" {
+			termFromReq = true
+		}
+	}
+
+	// Apply terminal fallback after all env merges.
+	effectivePTY := e.req.UsePTY && e.tool.UsePTY
+	termValue := strings.TrimSpace(envMap["TERM"])
+	if termValue == "" {
+		if effectivePTY {
+			envMap["TERM"] = "xterm-256color"
+		} else {
+			envMap["TERM"] = "dumb"
+		}
+	} else if effectivePTY && strings.EqualFold(termValue, "dumb") && !termFromReq && !forcedKeys["TERM"] {
+		// Service environments often have TERM=dumb; upgrade in PTY mode unless explicitly set.
+		envMap["TERM"] = "xterm-256color"
 	}
 
 	// If we have a config dir, set XDG_CONFIG_HOME

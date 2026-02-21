@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,16 +71,12 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 	// Always request PTY when stdin is a terminal - daemon decides based on tool config
 	usePTY := false
 	var winSize *protocol.WinSize
+	var reqEnv map[string]string
 	stdinFd := int(os.Stdin.Fd())
 	if term.IsTerminal(stdinFd) {
 		usePTY = true
-		cols, rows, _ := term.GetSize(stdinFd)
-		if cols > 0 && rows > 0 {
-			winSize = &protocol.WinSize{
-				Rows: uint16(rows),
-				Cols: uint16(cols),
-			}
-		}
+		winSize = detectWindowSize()
+		reqEnv = callerTerminalEnv()
 	}
 
 	// 4. Compute timestamp, nonce, and HMAC (includes PTY flag in signature)
@@ -88,7 +85,6 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
-	var reqEnv map[string]string
 	hmac, err := auth.ComputeHMACWithPTY(secret, timestamp, toolName, cwd, args, reqEnv, nonce, usePTY)
 	if err != nil {
 		return fmt.Errorf("compute hmac: %w", err)
@@ -282,6 +278,9 @@ func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd
 	signal.Notify(winSizeCh, syscall.SIGWINCH)
 	defer signal.Stop(signalCh)
 	defer signal.Stop(winSizeCh)
+	if err := w.sendWindowSize(ndjson); err != nil {
+		return err
+	}
 
 	// Main loop
 	responseCh := make(chan *protocol.ResponseMessage)
@@ -356,18 +355,76 @@ func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd
 			ndjson.Write(msg)
 
 		case <-winSizeCh:
-			// Get new window size and forward to daemon
-			cols, rows, _ := term.GetSize(stdinFd)
-			if cols > 0 && rows > 0 {
-				msg := &protocol.WrapperMessage{
-					Type: protocol.MsgTypeWinSize,
-					Rows: uint16(rows),
-					Cols: uint16(cols),
-				}
-				ndjson.Write(msg)
+			if err := w.sendWindowSize(ndjson); err != nil {
+				return err
 			}
 		}
 	}
+}
+
+func callerTerminalEnv() map[string]string {
+	env := make(map[string]string, 2)
+	if termValue := strings.TrimSpace(os.Getenv("TERM")); termValue != "" {
+		env["TERM"] = termValue
+	}
+	if colorTerm := strings.TrimSpace(os.Getenv("COLORTERM")); colorTerm != "" {
+		env["COLORTERM"] = colorTerm
+	}
+	if len(env) == 0 {
+		return nil
+	}
+	return env
+}
+
+func detectWindowSize() *protocol.WinSize {
+	return detectWindowSizeFromFDs(
+		[]int{int(os.Stdout.Fd()), int(os.Stdin.Fd()), int(os.Stderr.Fd())},
+		term.IsTerminal,
+		term.GetSize,
+	)
+}
+
+func detectWindowSizeFromFDs(
+	fds []int,
+	isTerminal func(fd int) bool,
+	getSize func(fd int) (width, height int, err error),
+) *protocol.WinSize {
+	seen := make(map[int]struct{}, len(fds))
+	for _, fd := range fds {
+		if _, exists := seen[fd]; exists {
+			continue
+		}
+		seen[fd] = struct{}{}
+
+		if !isTerminal(fd) {
+			continue
+		}
+		cols, rows, err := getSize(fd)
+		if err != nil || cols <= 0 || rows <= 0 {
+			continue
+		}
+		return &protocol.WinSize{
+			Rows: uint16(rows),
+			Cols: uint16(cols),
+		}
+	}
+	return nil
+}
+
+func (w *Wrapper) sendWindowSize(ndjson *framing.NDJSONWriter) error {
+	winSize := detectWindowSize()
+	if winSize == nil {
+		return nil
+	}
+	msg := &protocol.WrapperMessage{
+		Type: protocol.MsgTypeWinSize,
+		Rows: winSize.Rows,
+		Cols: winSize.Cols,
+	}
+	if err := ndjson.Write(msg); err != nil {
+		return fmt.Errorf("send winsize: %w", err)
+	}
+	return nil
 }
 
 func (w *Wrapper) handleResponse(msg *protocol.ResponseMessage) (done bool, err error) {

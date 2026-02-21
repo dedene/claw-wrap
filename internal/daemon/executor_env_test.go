@@ -494,3 +494,142 @@ func TestBuildEnvironment_UnifiedEnvAllowsDangerousVars(t *testing.T) {
 		t.Errorf("LD_PRELOAD = %q, want %q", val, "/lib/admin-controlled.so")
 	}
 }
+
+func TestBuildEnvironment_PTYFallbackTerm(t *testing.T) {
+	t.Setenv("TERM", "")
+	t.Setenv("COLORTERM", "")
+
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{
+			UsePTY: true,
+		},
+		tool: &config.ToolDef{
+			UsePTY: true,
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "TERM")
+	if !found {
+		t.Fatal("TERM should be set in PTY mode")
+	}
+	if val != "xterm-256color" {
+		t.Errorf("TERM = %q, want %q", val, "xterm-256color")
+	}
+}
+
+func TestBuildEnvironment_NonPTYFallbackTerm(t *testing.T) {
+	t.Setenv("TERM", "")
+
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{
+			UsePTY: false,
+		},
+		tool: &config.ToolDef{
+			UsePTY: true,
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "TERM")
+	if !found {
+		t.Fatal("TERM should be set in non-PTY mode")
+	}
+	if val != "dumb" {
+		t.Errorf("TERM = %q, want %q", val, "dumb")
+	}
+}
+
+func TestBuildEnvironment_UpgradesInheritedDumbInPTY(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{
+			UsePTY: true,
+		},
+		tool: &config.ToolDef{
+			UsePTY: true,
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "TERM")
+	if !found {
+		t.Fatal("TERM should be present")
+	}
+	if val != "xterm-256color" {
+		t.Errorf("TERM = %q, want %q", val, "xterm-256color")
+	}
+}
+
+func TestBuildEnvironment_ReqTermPreservedInPTY(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{
+			UsePTY: true,
+			Env: map[string]string{
+				"TERM": "screen-256color",
+			},
+		},
+		tool: &config.ToolDef{
+			UsePTY: true,
+		},
+		cfg: &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "TERM")
+	if !found {
+		t.Fatal("TERM should be present")
+	}
+	if val != "screen-256color" {
+		t.Errorf("TERM = %q, want %q", val, "screen-256color")
+	}
+}
+
+func TestBuildEnvironment_ReqColorTermPreserved(t *testing.T) {
+	t.Setenv("COLORTERM", "")
+
+	executor := &ToolExecutor{
+		req: &protocol.ProxyRequest{
+			Env: map[string]string{
+				"COLORTERM": "truecolor",
+			},
+		},
+		tool: &config.ToolDef{},
+		cfg:  &config.Config{},
+	}
+
+	env, err := executor.buildEnvironment()
+	if err != nil {
+		t.Fatalf("buildEnvironment() error: %v", err)
+	}
+
+	val, found := envContains(env, "COLORTERM")
+	if !found {
+		t.Fatal("COLORTERM should be present")
+	}
+	if val != "truecolor" {
+		t.Errorf("COLORTERM = %q, want %q", val, "truecolor")
+	}
+}
