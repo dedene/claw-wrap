@@ -2,18 +2,26 @@
 package protocol
 
 // ProtocolVersion is the wire protocol version for wrapper/daemon requests.
-const ProtocolVersion = 3
+const ProtocolVersion = 4
+
+// WinSize represents terminal window dimensions for PTY mode.
+type WinSize struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
+}
 
 // ProxyRequest is sent by wrapper to request tool execution (NDJSON format)
 type ProxyRequest struct {
-	Version   int               `json:"version,omitempty"`
-	Tool      string            `json:"tool"`
-	Args      []string          `json:"args"`
-	Cwd       string            `json:"cwd"`
-	Timestamp string            `json:"timestamp"`
-	Nonce     string            `json:"nonce"`
-	HMAC      string            `json:"hmac"`
-	Env       map[string]string `json:"env,omitempty"`
+	Version    int               `json:"version,omitempty"`
+	Tool       string            `json:"tool"`
+	Args       []string          `json:"args"`
+	Cwd        string            `json:"cwd"`
+	Timestamp  string            `json:"timestamp"`
+	Nonce      string            `json:"nonce"`
+	HMAC       string            `json:"hmac"`
+	Env        map[string]string `json:"env,omitempty"`
+	UsePTY     bool              `json:"use_pty,omitempty"`
+	WindowSize *WinSize          `json:"window_size,omitempty"`
 }
 
 // ResponseMessage is sent by daemon during execution (length-prefixed)
@@ -29,11 +37,13 @@ type ResponseMessage struct {
 
 // WrapperMessage is sent by wrapper during execution (NDJSON format)
 type WrapperMessage struct {
-	Type   string   `json:"type"`             // stdin, signal, cleanup
+	Type   string   `json:"type"`             // stdin, signal, cleanup, winsize
 	Data   string   `json:"data,omitempty"`   // base64 for stdin
 	EOF    bool     `json:"eof,omitempty"`    // stdin EOF
 	Signal string   `json:"signal,omitempty"` // SIGINT, SIGTERM, SIGHUP
 	Files  []string `json:"files,omitempty"`  // cleanup paths
+	Rows   uint16   `json:"rows,omitempty"`   // terminal rows (for winsize)
+	Cols   uint16   `json:"cols,omitempty"`   // terminal cols (for winsize)
 }
 
 // Message type constants
@@ -46,6 +56,7 @@ const (
 	MsgTypeStdin   = "stdin"
 	MsgTypeSignal  = "signal"
 	MsgTypeCleanup = "cleanup"
+	MsgTypeWinSize = "winsize"
 )
 
 // ValidSignals for signal forwarding

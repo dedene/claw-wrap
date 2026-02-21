@@ -613,7 +613,7 @@ func (d *Daemon) handleProxyRequest(conn net.Conn, data []byte, cfg *config.Conf
 		return
 	}
 
-	if err := auth.VerifyHMACWithEnv(d.secret, req.Timestamp, req.Tool, req.Cwd, req.Args, req.Env, req.Nonce, req.HMAC); err != nil {
+	if err := auth.VerifyHMACWithPTY(d.secret, req.Timestamp, req.Tool, req.Cwd, req.Args, req.Env, req.Nonce, req.UsePTY, req.HMAC); err != nil {
 		d.metrics.Inc("auth_fail")
 		log.Printf("[WARN] deny reason=auth_failed tool=%s err=%v", req.Tool, err)
 		d.sendProxyError(conn, "authentication failed")

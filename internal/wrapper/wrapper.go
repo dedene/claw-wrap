@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"claw-wrap/internal/auth"
 	"claw-wrap/internal/framing"
 	"claw-wrap/internal/paths"
@@ -64,42 +66,63 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 		return fmt.Errorf("get cwd: %w", err)
 	}
 
-	// 3. Compute timestamp, nonce, and HMAC
+	// 3. Detect terminal and request PTY if available
+	// Always request PTY when stdin is a terminal - daemon decides based on tool config
+	usePTY := false
+	var winSize *protocol.WinSize
+	stdinFd := int(os.Stdin.Fd())
+	if term.IsTerminal(stdinFd) {
+		usePTY = true
+		cols, rows, _ := term.GetSize(stdinFd)
+		if cols > 0 && rows > 0 {
+			winSize = &protocol.WinSize{
+				Rows: uint16(rows),
+				Cols: uint16(cols),
+			}
+		}
+	}
+
+	// 4. Compute timestamp, nonce, and HMAC (includes PTY flag in signature)
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce, err := auth.GenerateNonce()
 	if err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
 	var reqEnv map[string]string
-	hmac, err := auth.ComputeHMACWithEnv(secret, timestamp, toolName, cwd, args, reqEnv, nonce)
+	hmac, err := auth.ComputeHMACWithPTY(secret, timestamp, toolName, cwd, args, reqEnv, nonce, usePTY)
 	if err != nil {
 		return fmt.Errorf("compute hmac: %w", err)
 	}
 
-	// 4. Connect to socket
+	// 5. Connect to socket
 	conn, err := net.Dial("unix", w.socketPath)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer conn.Close()
 
-	// 5. Send ProxyRequest (NDJSON)
+	// 6. Send ProxyRequest (NDJSON)
 	req := &protocol.ProxyRequest{
-		Version:   protocol.ProtocolVersion,
-		Tool:      toolName,
-		Args:      args,
-		Cwd:       cwd,
-		Timestamp: timestamp,
-		Nonce:     nonce,
-		HMAC:      hmac,
-		Env:       reqEnv,
+		Version:    protocol.ProtocolVersion,
+		Tool:       toolName,
+		Args:       args,
+		Cwd:        cwd,
+		Timestamp:  timestamp,
+		Nonce:      nonce,
+		HMAC:       hmac,
+		Env:        reqEnv,
+		UsePTY:     usePTY,
+		WindowSize: winSize,
 	}
 	ndjson := framing.NewNDJSONWriter(conn)
 	if err := ndjson.Write(req); err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
 
-	// 6. Enter I/O loop
+	// 7. Enter I/O loop (PTY mode uses raw terminal)
+	if usePTY {
+		return w.ioLoopPTY(conn, ndjson, stdinFd)
+	}
 	return w.ioLoop(conn, ndjson)
 }
 
@@ -207,6 +230,142 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter) error {
 				Signal: sigName,
 			}
 			ndjson.Write(msg)
+		}
+	}
+}
+
+// ioLoopPTY handles I/O in PTY mode with raw terminal and SIGWINCH forwarding.
+func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd int) error {
+	// Put terminal in raw mode
+	oldState, err := term.MakeRaw(stdinFd)
+	if err != nil {
+		// Fall back to regular mode if raw mode fails
+		return w.ioLoop(conn, ndjson)
+	}
+	// Restore terminal on all exit paths. Note: os.Exit() doesn't run defers,
+	// so we call Restore explicitly before os.Exit and use defer for error returns.
+	defer term.Restore(stdinFd, oldState)
+
+	decoder := framing.NewDecoder(conn)
+
+	// Channels for coordination
+	stdinCh := make(chan []byte, 16)
+	stdinEOF := make(chan struct{})
+	signalCh := make(chan os.Signal, 1)
+	winSizeCh := make(chan os.Signal, 1)
+	doneCh := make(chan struct{})
+	var exitCode int
+
+	// Start stdin reader goroutine
+	go func() {
+		buf := make([]byte, 32*1024) // 32KB chunks
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				select {
+				case stdinCh <- chunk:
+				case <-doneCh:
+					return
+				}
+			}
+			if err != nil {
+				close(stdinEOF)
+				return
+			}
+		}
+	}()
+
+	// Register signal handlers
+	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(winSizeCh, syscall.SIGWINCH)
+	defer signal.Stop(signalCh)
+	defer signal.Stop(winSizeCh)
+
+	// Main loop
+	responseCh := make(chan *protocol.ResponseMessage)
+	errCh := make(chan error)
+
+	// Response reader goroutine
+	go func() {
+		for {
+			var msg protocol.ResponseMessage
+			if err := decoder.Decode(&msg); err != nil {
+				if err != io.EOF {
+					errCh <- err
+				}
+				return
+			}
+			select {
+			case responseCh <- &msg:
+			case <-doneCh:
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case msg := <-responseCh:
+			done, err := w.handleResponse(msg)
+			if err != nil {
+				return err
+			}
+			if done {
+				exitCode = msg.ExitCode
+				close(doneCh)
+				// Restore terminal before os.Exit (defers don't run on os.Exit)
+				term.Restore(stdinFd, oldState)
+				os.Exit(exitCode)
+			}
+
+		case err := <-errCh:
+			close(doneCh)
+			return fmt.Errorf("read response: %w", err)
+
+		case chunk := <-stdinCh:
+			msg := &protocol.WrapperMessage{
+				Type: protocol.MsgTypeStdin,
+				Data: base64.StdEncoding.EncodeToString(chunk),
+			}
+			if err := ndjson.Write(msg); err != nil {
+				return fmt.Errorf("send stdin: %w", err)
+			}
+
+		case <-stdinEOF:
+			msg := &protocol.WrapperMessage{
+				Type: protocol.MsgTypeStdin,
+				EOF:  true,
+			}
+			ndjson.Write(msg)
+			stdinEOF = nil // Disable this case
+
+		case sig := <-signalCh:
+			sigName := "SIGTERM"
+			switch sig {
+			case syscall.SIGINT:
+				sigName = "SIGINT"
+			case syscall.SIGHUP:
+				sigName = "SIGHUP"
+			}
+			msg := &protocol.WrapperMessage{
+				Type:   protocol.MsgTypeSignal,
+				Signal: sigName,
+			}
+			ndjson.Write(msg)
+
+		case <-winSizeCh:
+			// Get new window size and forward to daemon
+			cols, rows, _ := term.GetSize(stdinFd)
+			if cols > 0 && rows > 0 {
+				msg := &protocol.WrapperMessage{
+					Type: protocol.MsgTypeWinSize,
+					Rows: uint16(rows),
+					Cols: uint16(cols),
+				}
+				ndjson.Write(msg)
+			}
 		}
 	}
 }

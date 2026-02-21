@@ -4,9 +4,11 @@ go 1.24.4
 
 require (
 	filippo.io/age v1.3.1
+	github.com/creack/pty v1.1.24
 	github.com/elazarl/goproxy v1.8.1
 	github.com/itchyny/gojq v0.12.18
-	golang.org/x/sys v0.40.0
+	golang.org/x/sys v0.41.0
+	golang.org/x/term v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

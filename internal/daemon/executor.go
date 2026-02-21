@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
+
 	"claw-wrap/internal/audit"
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/credentials"
@@ -145,6 +147,12 @@ type ToolExecutor struct {
 	startTime   time.Time
 	stdoutHash  hash.Hash
 	stderrHash  hash.Hash
+
+	// PTY mode fields
+	usePTY    bool     // effective PTY mode (req.UsePTY && tool.UsePTY)
+	ptyMaster *os.File // PTY master fd (nil if not using PTY)
+	ptyBuf    *OutputBuffer
+	ptyHash   hash.Hash
 }
 
 // NewToolExecutor creates a new ToolExecutor for the given request.
@@ -433,7 +441,14 @@ func (e *ToolExecutor) setupConfigFile() error {
 }
 
 // startProcess spawns the tool in a new process group.
+// If PTY mode is enabled, delegates to startProcessWithPTY.
 func (e *ToolExecutor) startProcess(env []string) error {
+	// Check if PTY mode should be used
+	e.usePTY = e.req.UsePTY && e.tool.UsePTY
+	if e.usePTY {
+		return e.startProcessWithPTY(env)
+	}
+
 	e.cmd = exec.CommandContext(e.ctx, e.tool.Binary, e.req.Args...)
 	e.cmd.Dir = e.req.Cwd
 	e.cmd.Env = env
@@ -491,6 +506,151 @@ func (e *ToolExecutor) startProcess(env []string) error {
 	go e.stdoutPumper(stdout)
 	go e.stderrPumper(stderr)
 	go e.stdinPumper() // stdin pumper runs independently
+
+	return nil
+}
+
+// startProcessWithPTY spawns the tool with a pseudo-terminal.
+// This enables interactive TUI applications to work correctly with colors and cursor control.
+func (e *ToolExecutor) startProcessWithPTY(env []string) error {
+	e.cmd = exec.CommandContext(e.ctx, e.tool.Binary, e.req.Args...)
+	e.cmd.Dir = e.req.Cwd
+	e.cmd.Env = env
+
+	// Start with PTY - pty.Start handles setting up stdin/stdout/stderr
+	ptmx, err := pty.Start(e.cmd)
+	if err != nil {
+		return fmt.Errorf("pty start: %w", err)
+	}
+	e.ptyMaster = ptmx
+
+	// Get process group ID. pty.Start() calls Setsid() internally,
+	// making the child its own session leader and process group leader.
+	e.pgid = e.cmd.Process.Pid
+
+	// Set initial window size if provided
+	if e.req.WindowSize != nil {
+		if err := pty.Setsize(ptmx, &pty.Winsize{
+			Rows: e.req.WindowSize.Rows,
+			Cols: e.req.WindowSize.Cols,
+		}); err != nil {
+			log.Printf("[WARN] set initial window size: %v", err)
+		}
+	}
+
+	// Create single output buffer for PTY (stdout and stderr are merged)
+	// PTY mode always streams inline - no file buffering threshold
+	e.ptyBuf = NewOutputBuffer("stdout", 0, e.maxOutSz, e.sendMessage)
+	if len(e.tool.RedactOutput) > 0 {
+		e.ptyBuf.SetRedactor(NewOutputRedactor(e.tool.RedactOutput))
+	}
+
+	// Wire up SHA256 hasher for audit output hash
+	if auditCfg := e.cfg.GetAuditConfig(); auditCfg != nil && auditCfg.Enabled && auditCfg.GetIncludeOutputHash() {
+		e.ptyHash = sha256.New()
+		e.ptyBuf.SetTee(e.ptyHash)
+	}
+
+	// Start I/O pumpers
+	e.pumperWg.Add(1) // Single pumper for PTY output
+
+	go e.ptyOutputPumper(ptmx)
+	go e.ptyInputPumper(ptmx) // stdin pumper runs independently
+
+	return nil
+}
+
+// ptyOutputPumper reads from PTY master and writes to the output buffer.
+func (e *ToolExecutor) ptyOutputPumper(r io.Reader) {
+	defer e.pumperWg.Done()
+
+	buf := make([]byte, 32*1024) // 32KB buffer
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if writeErr := e.ptyBuf.Write(buf[:n]); writeErr != nil {
+				if errors.Is(writeErr, ErrOutputLimitExceeded) {
+					log.Printf("[WARN] pty output: %v, killing process", writeErr)
+					e.killProcessGroup(syscall.SIGKILL)
+					return
+				}
+				log.Printf("[WARN] pty output write: %v", writeErr)
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[DEBUG] pty output read: %v", err)
+			}
+			return
+		}
+	}
+}
+
+// ptyInputPumper reads WrapperMessages from the connection and writes to PTY master.
+func (e *ToolExecutor) ptyInputPumper(ptmx *os.File) {
+	reader := framing.NewNDJSONReaderWithLimit(e.conn, e.msgSize)
+
+	for {
+		if e.readMsgTO > 0 {
+			_ = e.conn.SetReadDeadline(time.Now().Add(e.readMsgTO))
+		}
+
+		var msg protocol.WrapperMessage
+		if err := reader.Read(&msg); err != nil {
+			_ = e.conn.SetReadDeadline(time.Time{})
+			if err != io.EOF {
+				if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+					log.Printf("[WARN] pty stdin/control read timeout after %v", e.readMsgTO)
+				}
+				log.Printf("[DEBUG] pty stdin read: %v", err)
+			}
+			return
+		}
+		_ = e.conn.SetReadDeadline(time.Time{})
+
+		if err := e.handlePTYWrapperMessage(&msg, ptmx); err != nil {
+			log.Printf("[WARN] handle pty wrapper message: %v", err)
+		}
+	}
+}
+
+// handlePTYWrapperMessage processes a message from the wrapper in PTY mode.
+func (e *ToolExecutor) handlePTYWrapperMessage(msg *protocol.WrapperMessage, ptmx *os.File) error {
+	switch msg.Type {
+	case protocol.MsgTypeStdin:
+		if msg.EOF {
+			// In PTY mode, we don't close the master - just stop writing
+			return nil
+		}
+		// Decode and write data to PTY master
+		data, err := base64.StdEncoding.DecodeString(msg.Data)
+		if err != nil {
+			return fmt.Errorf("decode stdin: %w", err)
+		}
+		if _, err := ptmx.Write(data); err != nil {
+			return fmt.Errorf("write pty: %w", err)
+		}
+
+	case protocol.MsgTypeSignal:
+		if err := e.forwardSignal(msg.Signal); err != nil {
+			return fmt.Errorf("forward signal: %w", err)
+		}
+
+	case protocol.MsgTypeWinSize:
+		if err := pty.Setsize(ptmx, &pty.Winsize{
+			Rows: msg.Rows,
+			Cols: msg.Cols,
+		}); err != nil {
+			return fmt.Errorf("set window size: %w", err)
+		}
+
+	case protocol.MsgTypeCleanup:
+		// Compatibility no-op
+		log.Printf("[DEBUG] ignoring client cleanup request in PTY mode")
+
+	default:
+		log.Printf("[WARN] unknown wrapper message type in PTY mode: %s", msg.Type)
+	}
 
 	return nil
 }
@@ -737,27 +897,49 @@ func (e *ToolExecutor) sendDone(exitCode int, timeout bool) {
 
 // finalizeOutput closes output buffers and streams any file-buffered output.
 func (e *ToolExecutor) finalizeOutput() error {
-	// Finalize stdout buffer
-	if stdoutPath, err := e.stdoutBuf.Finalize(); err != nil {
-		return fmt.Errorf("finalize stdout: %w", err)
-	} else if stdoutPath != "" {
-		if err := e.streamFile(stdoutPath, protocol.MsgTypeStdout); err != nil {
-			return fmt.Errorf("stream stdout file: %w", err)
+	// PTY mode uses single buffer
+	if e.usePTY {
+		if e.ptyBuf != nil {
+			if ptyPath, err := e.ptyBuf.Finalize(); err != nil {
+				return fmt.Errorf("finalize pty output: %w", err)
+			} else if ptyPath != "" {
+				if err := e.streamFile(ptyPath, protocol.MsgTypeStdout); err != nil {
+					return fmt.Errorf("stream pty file: %w", err)
+				}
+				if err := os.Remove(ptyPath); err != nil && !os.IsNotExist(err) {
+					log.Printf("[WARN] cleanup pty temp file %s: %v", ptyPath, err)
+				}
+			}
 		}
-		if err := os.Remove(stdoutPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[WARN] cleanup stdout temp file %s: %v", stdoutPath, err)
+		return nil
+	}
+
+	// Pipe mode uses separate stdout/stderr buffers
+	// Finalize stdout buffer
+	if e.stdoutBuf != nil {
+		if stdoutPath, err := e.stdoutBuf.Finalize(); err != nil {
+			return fmt.Errorf("finalize stdout: %w", err)
+		} else if stdoutPath != "" {
+			if err := e.streamFile(stdoutPath, protocol.MsgTypeStdout); err != nil {
+				return fmt.Errorf("stream stdout file: %w", err)
+			}
+			if err := os.Remove(stdoutPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[WARN] cleanup stdout temp file %s: %v", stdoutPath, err)
+			}
 		}
 	}
 
 	// Finalize stderr buffer
-	if stderrPath, err := e.stderrBuf.Finalize(); err != nil {
-		return fmt.Errorf("finalize stderr: %w", err)
-	} else if stderrPath != "" {
-		if err := e.streamFile(stderrPath, protocol.MsgTypeStderr); err != nil {
-			return fmt.Errorf("stream stderr file: %w", err)
-		}
-		if err := os.Remove(stderrPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[WARN] cleanup stderr temp file %s: %v", stderrPath, err)
+	if e.stderrBuf != nil {
+		if stderrPath, err := e.stderrBuf.Finalize(); err != nil {
+			return fmt.Errorf("finalize stderr: %w", err)
+		} else if stderrPath != "" {
+			if err := e.streamFile(stderrPath, protocol.MsgTypeStderr); err != nil {
+				return fmt.Errorf("stream stderr file: %w", err)
+			}
+			if err := os.Remove(stderrPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[WARN] cleanup stderr temp file %s: %v", stderrPath, err)
+			}
 		}
 	}
 
@@ -862,10 +1044,16 @@ func (e *ToolExecutor) cleanup() {
 	// Cancel context
 	e.cancel()
 
-	// Close stdin pipe if still open
+	// Close stdin pipe if still open (pipe mode)
 	if e.stdinPipe != nil {
 		e.stdinPipe.Close()
 		e.stdinPipe = nil
+	}
+
+	// Close PTY master if still open (PTY mode)
+	if e.ptyMaster != nil {
+		e.ptyMaster.Close()
+		e.ptyMaster = nil
 	}
 
 	// Kill process group if still running
@@ -880,6 +1068,9 @@ func (e *ToolExecutor) cleanup() {
 	}
 	if e.stderrBuf != nil {
 		e.stderrBuf.Cleanup()
+	}
+	if e.ptyBuf != nil {
+		e.ptyBuf.Cleanup()
 	}
 
 	// Remove config dir
@@ -901,6 +1092,19 @@ func (e *ToolExecutor) emitAuditEntry(exitCode int, timeout bool) {
 		return
 	}
 
+	// Calculate output bytes based on mode
+	var outputBytes int64
+	if e.usePTY && e.ptyBuf != nil {
+		outputBytes = e.ptyBuf.Accumulated()
+	} else {
+		if e.stdoutBuf != nil {
+			outputBytes += e.stdoutBuf.Accumulated()
+		}
+		if e.stderrBuf != nil {
+			outputBytes += e.stderrBuf.Accumulated()
+		}
+	}
+
 	entry := audit.Entry{
 		Timestamp:   e.startTime.UTC().Format(time.RFC3339),
 		Tool:        e.req.Tool,
@@ -908,7 +1112,7 @@ func (e *ToolExecutor) emitAuditEntry(exitCode int, timeout bool) {
 		CallerPID:   e.callerPID,
 		CallerExe:   e.callerExe,
 		ExitCode:    exitCode,
-		OutputBytes: e.stdoutBuf.Accumulated() + e.stderrBuf.Accumulated(),
+		OutputBytes: outputBytes,
 	}
 	if timeout {
 		entry.Timeout = true
@@ -919,11 +1123,18 @@ func (e *ToolExecutor) emitAuditEntry(exitCode int, timeout bool) {
 	if auditCfg.GetIncludeDuration() {
 		entry.DurationMs = time.Since(e.startTime).Milliseconds()
 	}
-	if auditCfg.GetIncludeOutputHash() && e.stdoutHash != nil {
-		combined := sha256.New()
-		combined.Write(e.stdoutHash.Sum(nil))
-		combined.Write(e.stderrHash.Sum(nil))
-		entry.OutputHash = fmt.Sprintf("sha256:%x", combined.Sum(nil))
+	// Calculate output hash based on mode
+	if auditCfg.GetIncludeOutputHash() {
+		if e.usePTY && e.ptyHash != nil {
+			entry.OutputHash = fmt.Sprintf("sha256:%x", e.ptyHash.Sum(nil))
+		} else if e.stdoutHash != nil {
+			combined := sha256.New()
+			combined.Write(e.stdoutHash.Sum(nil))
+			if e.stderrHash != nil {
+				combined.Write(e.stderrHash.Sum(nil))
+			}
+			entry.OutputHash = fmt.Sprintf("sha256:%x", combined.Sum(nil))
+		}
 	}
 
 	if err := e.auditLogger.Log(entry); err != nil {

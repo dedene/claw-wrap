@@ -946,6 +946,66 @@ func TestValidate_FullValidConfig(t *testing.T) {
 	}
 }
 
+func TestValidate_UsePTY_ValidConfig(t *testing.T) {
+	cfg := &Config{
+		Tools: map[string]ToolDef{
+			"vim": {
+				Binary: "/usr/bin/vim",
+				UsePTY: true,
+			},
+			"grep": {
+				Binary: "/usr/bin/grep",
+				UsePTY: false,
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Errorf("Validate() unexpected error for PTY config: %v", err)
+	}
+
+	// Verify the flag is preserved
+	if !cfg.Tools["vim"].UsePTY {
+		t.Error("UsePTY should be true for vim")
+	}
+	if cfg.Tools["grep"].UsePTY {
+		t.Error("UsePTY should be false for grep")
+	}
+}
+
+func TestLoad_UsePTY_FromYAML(t *testing.T) {
+	yaml := `
+tools:
+  vim:
+    binary: /usr/bin/vim
+    use_pty: true
+  grep:
+    binary: /usr/bin/grep
+`
+	tmpFile, err := os.CreateTemp("", "config-pty-*.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(yaml); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	tmpFile.Close()
+
+	cfg, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Tools["vim"].UsePTY {
+		t.Error("UsePTY should be true for vim (from YAML)")
+	}
+	if cfg.Tools["grep"].UsePTY {
+		t.Error("UsePTY should default to false for grep")
+	}
+}
+
 func TestValidate_ConfigFilePathTraversalRejected(t *testing.T) {
 	cfg := &Config{
 		Credentials: map[string]CredentialDef{

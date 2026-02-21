@@ -186,6 +186,7 @@ type ToolDef struct {
 	RedactOutput []ToolRedactRule  `yaml:"redact_output,omitempty"`
 	ConfigFile   *ConfigFileDef    `yaml:"config_file,omitempty"`
 	UseProxy     bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
+	UsePTY       bool              `yaml:"use_pty,omitempty"`   // Enable PTY mode for interactive TUI apps
 }
 
 // ToolRedactRule defines an output redaction rule for tool stdout/stderr.
