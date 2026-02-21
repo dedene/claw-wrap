@@ -79,6 +79,13 @@ func WithBWBinary(path string) Option {
 	}
 }
 
+// WithVaultBinary sets the HashiCorp Vault CLI binary path.
+func WithVaultBinary(path string) Option {
+	return func(p *Proxy) {
+		p.credOpts = append(p.credOpts, credentials.WithVaultBinary(path))
+	}
+}
+
 // WithAuthToken sets the required proxy auth token.
 func WithAuthToken(token string) Option {
 	return func(p *Proxy) {
@@ -594,6 +601,7 @@ func SetupFromConfig(cfg *config.Config) (*Proxy, error) {
 		WithPassBinary(cfg.GetPassBinary()),
 		WithOPBinary(cfg.GetOPBinary()),
 		WithBWBinary(cfg.GetBWBinary()),
+		WithVaultBinary(cfg.GetVaultBinary()),
 	)
 
 	return proxy, nil

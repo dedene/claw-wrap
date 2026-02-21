@@ -504,7 +504,7 @@ func TestBuildEnvironment_PTYFallbackTerm(t *testing.T) {
 			UsePTY: true,
 		},
 		tool: &config.ToolDef{},
-		cfg: &config.Config{},
+		cfg:  &config.Config{},
 	}
 
 	env, err := executor.buildEnvironment()
@@ -529,7 +529,7 @@ func TestBuildEnvironment_NonPTYFallbackTerm(t *testing.T) {
 			UsePTY: false,
 		},
 		tool: &config.ToolDef{},
-		cfg: &config.Config{},
+		cfg:  &config.Config{},
 	}
 
 	env, err := executor.buildEnvironment()
@@ -554,7 +554,7 @@ func TestBuildEnvironment_UpgradesInheritedDumbInPTY(t *testing.T) {
 			UsePTY: true,
 		},
 		tool: &config.ToolDef{},
-		cfg: &config.Config{},
+		cfg:  &config.Config{},
 	}
 
 	env, err := executor.buildEnvironment()
@@ -582,7 +582,7 @@ func TestBuildEnvironment_ReqTermPreservedInPTY(t *testing.T) {
 			},
 		},
 		tool: &config.ToolDef{},
-		cfg: &config.Config{},
+		cfg:  &config.Config{},
 	}
 
 	env, err := executor.buildEnvironment()

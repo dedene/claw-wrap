@@ -59,6 +59,12 @@ type ProxyConfig struct {
 	ReplayCacheTTL        string `yaml:"replay_cache_ttl"`        // e.g., "2m"
 	ReplayCacheMax        int    `yaml:"replay_cache_max_entries"`
 	CredentialCacheTTL    string `yaml:"credential_cache_ttl"` // e.g., "30s" (0/empty disables)
+	VaultBinary           string `yaml:"vault_binary"`         // e.g., "/usr/bin/vault"
+	VaultAddr             string `yaml:"vault_addr"`           // e.g., "https://127.0.0.1:8200"
+	VaultSkipVerify       bool   `yaml:"vault_skip_verify"`    // skip TLS verification
+	VaultCACert           string `yaml:"vault_cacert"`         // e.g., "/path/to/ca.pem"
+	VaultNamespace        string `yaml:"vault_namespace"`      // enterprise namespace
+	VaultTokenFile        string `yaml:"vault_token_file"`     // override default ~/.vault-token
 }
 
 // SecurityConfig holds security policy flags.
@@ -185,8 +191,8 @@ type ToolDef struct {
 	AllowedArgs  []BlockedArg      `yaml:"allowed_args,omitempty"`
 	RedactOutput []ToolRedactRule  `yaml:"redact_output,omitempty"`
 	ConfigFile   *ConfigFileDef    `yaml:"config_file,omitempty"`
-	UseProxy bool  `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
-	UsePTY   *bool `yaml:"use_pty,omitempty"`   // PTY mode: nil=default on, false=opt out
+	UseProxy     bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
+	UsePTY       *bool             `yaml:"use_pty,omitempty"`   // PTY mode: nil=default on, false=opt out
 }
 
 // GetUsePTY returns whether PTY mode is enabled for this tool.
@@ -822,6 +828,63 @@ func (c *Config) GetBWBinary() string {
 			return ""
 		}
 		return c.Proxy.BWBinary
+	}
+	return ""
+}
+
+// GetVaultBinary returns the configured Vault CLI binary path or empty for trusted-directory lookup.
+func (c *Config) GetVaultBinary() string {
+	if c.Proxy != nil && c.Proxy.VaultBinary != "" {
+		if !filepath.IsAbs(c.Proxy.VaultBinary) {
+			log.Printf("[WARN] vault_binary %q is not absolute, using trusted-directory lookup", c.Proxy.VaultBinary)
+			return ""
+		}
+		return c.Proxy.VaultBinary
+	}
+	return ""
+}
+
+// GetVaultAddr returns the configured Vault server address (empty = use VAULT_ADDR env).
+func (c *Config) GetVaultAddr() string {
+	if c.Proxy != nil {
+		return c.Proxy.VaultAddr
+	}
+	return ""
+}
+
+// GetVaultSkipVerify returns whether to skip Vault TLS verification.
+func (c *Config) GetVaultSkipVerify() bool {
+	return c.Proxy != nil && c.Proxy.VaultSkipVerify
+}
+
+// GetVaultCACert returns the Vault CA cert path (empty = use VAULT_CACERT env).
+func (c *Config) GetVaultCACert() string {
+	if c.Proxy != nil && c.Proxy.VaultCACert != "" {
+		if !filepath.IsAbs(c.Proxy.VaultCACert) {
+			log.Printf("[WARN] vault_cacert %q is not absolute, ignoring", c.Proxy.VaultCACert)
+			return ""
+		}
+		return c.Proxy.VaultCACert
+	}
+	return ""
+}
+
+// GetVaultNamespace returns the Vault enterprise namespace (empty = none).
+func (c *Config) GetVaultNamespace() string {
+	if c.Proxy != nil {
+		return c.Proxy.VaultNamespace
+	}
+	return ""
+}
+
+// GetVaultTokenFile returns the Vault token file path (empty = default ~/.vault-token).
+func (c *Config) GetVaultTokenFile() string {
+	if c.Proxy != nil && c.Proxy.VaultTokenFile != "" {
+		if !filepath.IsAbs(c.Proxy.VaultTokenFile) {
+			log.Printf("[WARN] vault_token_file %q is not absolute, ignoring", c.Proxy.VaultTokenFile)
+			return ""
+		}
+		return c.Proxy.VaultTokenFile
 	}
 	return ""
 }

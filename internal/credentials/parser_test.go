@@ -95,6 +95,26 @@ func TestParseSource(t *testing.T) {
 			wantJQ:      ".credentials.token",
 		},
 
+		// Vault backend
+		{
+			name:        "vault simple",
+			source:      "vault:secret/myapp/api-key",
+			wantBackend: BackendVault,
+			wantPath:    "secret/myapp/api-key",
+		},
+		{
+			name:        "vault with jq",
+			source:      "vault:secret/myapp/creds | .password",
+			wantBackend: BackendVault,
+			wantPath:    "secret/myapp/creds",
+			wantJQ:      ".password",
+		},
+		{
+			name:    "vault empty path",
+			source:  "vault:",
+			wantErr: true,
+		},
+
 		// Complex jq expressions
 		{
 			name:        "complex jq filter",

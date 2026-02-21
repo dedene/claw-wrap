@@ -87,6 +87,20 @@ claw-wrap supports two approaches for credential injection:
 - You want route-based credential injection by host/path
 - Multiple tools need the same API credentials
 
+## Secret Backends
+
+| Backend | Prefix | Example | Notes |
+| ------- | ------ | ------- | ----- |
+| [pass](https://www.passwordstore.org/) | `pass:` | `pass:cli/github/token` | Default when no prefix given |
+| Environment | `env:` | `env:MY_TOKEN` | Reads from daemon environment |
+| [1Password](https://1password.com/) | `op://` | `op://Vault/Item/field` | Requires `op` CLI, session auth |
+| [Bitwarden](https://bitwarden.com/) | `bw:` | `bw:item-uuid` | Requires `bw` CLI, session managed |
+| [macOS Keychain](https://support.apple.com/guide/keychain-access/) | `keychain:` | `keychain:service-name` | macOS only |
+| [age](https://age-encryption.org/) | `age:` | `age:/path/to/file.age` | File-level encryption |
+| [HashiCorp Vault](https://www.vaultproject.io/) | `vault:` | `vault:secret/myapp/key` | KV-v1 & KV-v2, external auth |
+
+All backends except `env:` support jq extraction: `vault:secret/app/creds \| .password`
+
 ## Quick Start
 
 This example sets up `gh` (GitHub CLI) as a proxied tool.

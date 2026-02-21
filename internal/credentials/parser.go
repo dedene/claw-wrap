@@ -16,6 +16,7 @@ const (
 	BackendAge       Backend = "age"
 	BackendKeychain  Backend = "keychain"
 	BackendBitwarden Backend = "bw"
+	BackendVault     Backend = "vault"
 )
 
 // ParsedSource represents a parsed credential source URI.
@@ -38,6 +39,8 @@ type ParsedSource struct {
 //   - keychain:service-name | .jq_expr
 //   - age:/path/to/file.age
 //   - age:/path/to/file.age | .jq_expr
+//   - vault:secret/myapp/api-key
+//   - vault:secret/myapp/api-key | .password
 //   - path/in/store (legacy, assumed pass)
 func ParseSource(source string) (*ParsedSource, error) {
 	if source == "" {
@@ -79,6 +82,9 @@ func ParseSource(source string) (*ParsedSource, error) {
 	case strings.HasPrefix(source, "env:"):
 		backend = BackendEnv
 		path = strings.TrimPrefix(source, "env:")
+	case strings.HasPrefix(source, "vault:"):
+		backend = BackendVault
+		path = strings.TrimPrefix(source, "vault:")
 	default:
 		// Legacy format: assume pass
 		backend = BackendPass

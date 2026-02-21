@@ -25,6 +25,7 @@ type FetchOptions struct {
 	PassBinary  string
 	OPBinary    string
 	BWBinary    string
+	VaultBinary string
 	BypassCache bool
 }
 
@@ -52,6 +53,13 @@ func WithBWBinary(path string) FetchOption {
 	}
 }
 
+// WithVaultBinary sets the path to the HashiCorp Vault CLI binary.
+func WithVaultBinary(path string) FetchOption {
+	return func(o *FetchOptions) {
+		o.VaultBinary = path
+	}
+}
+
 // WithBypassCache forces live credential fetches and bypasses result caching.
 func WithBypassCache() FetchOption {
 	return func(o *FetchOptions) {
@@ -67,6 +75,7 @@ func WithBypassCache() FetchOption {
 //   - age:/path/to/file.age - decrypt age-encrypted file
 //   - keychain:service-name - fetch from macOS Keychain
 //   - bw:item-uuid - fetch from Bitwarden
+//   - vault:secret/path - fetch from HashiCorp Vault
 //   - path/in/store - legacy format, assumed to be pass
 //
 // All sources optionally support jq extraction: "source | .jq_expr"
@@ -141,6 +150,12 @@ func Fetch(source string, opts ...FetchOption) (string, error) {
 
 	case BackendBitwarden:
 		result, err = fetchFromBitwarden(ctx, parsed, options.BWBinary)
+		if err != nil {
+			return "", err
+		}
+
+	case BackendVault:
+		result, err = fetchFromVault(ctx, parsed, options.VaultBinary)
 		if err != nil {
 			return "", err
 		}

@@ -676,4 +676,3 @@ tools: {}
 		t.Fatalf("proxyAuthToken changed across disable/enable: got %q, want %q", d.proxyAuthToken, firstToken)
 	}
 }
-
