@@ -13,7 +13,10 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/paths"
@@ -35,8 +38,16 @@ type CAManager struct {
 	certPath string
 	keyPath  string
 	config   config.CAConfig
+	external bool // external management mode (cert-manager, k8s secrets, etc.)
 
-	cert *tls.Certificate
+	cert        *tls.Certificate
+	certMu      sync.RWMutex      // protects cert during hot-reload
+	watcher     *fsnotify.Watcher // file watcher for external mode
+	stopCh      chan struct{}     // stop signal for watcher goroutine
+	watcherWg   sync.WaitGroup    // wait for watcher goroutine to exit
+	watcherMu   sync.Mutex        // protects watcher lifecycle (start/stop)
+	watcherInit bool              // true if watcher was started
+	permLogOnce sync.Once         // ensures permission relaxation logged only once
 }
 
 // NewCAManager creates a new CA manager with the given configuration.
@@ -46,10 +57,21 @@ func NewCAManager(cfg config.CAConfig) *CAManager {
 		path = DefaultCAPath()
 	}
 
+	// Use custom filenames or defaults
+	certFile := cfg.CertFile
+	if certFile == "" {
+		certFile = "ca.crt"
+	}
+	keyFile := cfg.KeyFile
+	if keyFile == "" {
+		keyFile = "ca.key"
+	}
+
 	return &CAManager{
-		certPath: filepath.Join(path, "ca.crt"),
-		keyPath:  filepath.Join(path, "ca.key"),
+		certPath: filepath.Join(path, certFile),
+		keyPath:  filepath.Join(path, keyFile),
 		config:   cfg,
+		external: cfg.External,
 	}
 }
 
@@ -64,13 +86,30 @@ func (m *CAManager) EnsureCA() (*tls.Certificate, error) {
 	// Try to load existing CA
 	cert, err := m.loadCA()
 	if err == nil {
-		// Check if rotation is needed
-		if m.needsRotation(cert) {
+		// Validate it's actually a CA certificate
+		if err := m.validateCA(cert); err != nil {
+			return nil, fmt.Errorf("CA validation failed: %w", err)
+		}
+
+		// Check if rotation is needed (only for self-managed CAs)
+		if !m.external && m.needsRotation(cert) {
 			log.Printf("[INFO] CA certificate expires soon, regenerating")
 			return m.generateAndSaveCA()
 		}
+
+		m.certMu.Lock()
 		m.cert = cert
+		m.certMu.Unlock()
+
+		if m.external {
+			log.Printf("[INFO] Using external CA from %s", sanitizePath(m.certPath))
+		}
 		return cert, nil
+	}
+
+	// External mode: fail if CA files don't exist
+	if m.external {
+		return nil, fmt.Errorf("external CA not found at %s: %w (hint: ensure cert-manager secret is mounted)", sanitizePath(m.certPath), err)
 	}
 
 	// Generate new CA
@@ -78,8 +117,41 @@ func (m *CAManager) EnsureCA() (*tls.Certificate, error) {
 	return m.generateAndSaveCA()
 }
 
-// Certificate returns the loaded CA certificate.
+// validateCA checks that the loaded certificate is actually a CA.
+func (m *CAManager) validateCA(cert *tls.Certificate) error {
+	if len(cert.Certificate) == 0 {
+		return fmt.Errorf("certificate chain is empty")
+	}
+
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse certificate: %w", err)
+	}
+
+	if !x509Cert.IsCA {
+		return fmt.Errorf("certificate is not a CA (IsCA=false)")
+	}
+
+	if x509Cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return fmt.Errorf("certificate lacks KeyUsageCertSign")
+	}
+
+	// Check certificate expiry
+	now := time.Now()
+	if now.Before(x509Cert.NotBefore) {
+		return fmt.Errorf("certificate not yet valid (NotBefore: %s)", x509Cert.NotBefore.Format(time.RFC3339))
+	}
+	if now.After(x509Cert.NotAfter) {
+		return fmt.Errorf("certificate expired on %s", x509Cert.NotAfter.Format(time.RFC3339))
+	}
+
+	return nil
+}
+
+// Certificate returns the loaded CA certificate (thread-safe).
 func (m *CAManager) Certificate() *tls.Certificate {
+	m.certMu.RLock()
+	defer m.certMu.RUnlock()
 	return m.cert
 }
 
@@ -90,10 +162,14 @@ func (m *CAManager) CertPath() string {
 
 // NeedsRotation checks if the CA certificate needs rotation.
 func (m *CAManager) NeedsRotation() bool {
-	if m.cert == nil {
+	m.certMu.RLock()
+	cert := m.cert
+	m.certMu.RUnlock()
+
+	if cert == nil {
 		return true
 	}
-	return m.needsRotation(m.cert)
+	return m.needsRotation(cert)
 }
 
 func (m *CAManager) needsRotation(cert *tls.Certificate) bool {
@@ -113,13 +189,20 @@ func (m *CAManager) needsRotation(cert *tls.Certificate) bool {
 
 func (m *CAManager) loadCA() (*tls.Certificate, error) {
 	// Check key file permissions before loading (security: detect compromised keys)
-	info, err := os.Stat(m.keyPath)
-	if err != nil {
-		return nil, err
-	}
-	perm := info.Mode().Perm()
-	if perm > 0o600 {
-		return nil, fmt.Errorf("CA key %s has insecure permissions %04o (want 0600 or stricter)", m.keyPath, perm)
+	// Skip permission check for external mode (k8s secrets mount with 0644)
+	if !m.external {
+		info, err := os.Stat(m.keyPath)
+		if err != nil {
+			return nil, err
+		}
+		perm := info.Mode().Perm()
+		if perm > 0o600 {
+			return nil, fmt.Errorf("CA key has insecure permissions %04o (want 0600 or stricter)", perm)
+		}
+	} else {
+		m.permLogOnce.Do(func() {
+			log.Printf("[INFO] External CA mode: key permission check relaxed (k8s compat)")
+		})
 	}
 
 	cert, err := tls.LoadX509KeyPair(m.certPath, m.keyPath)
@@ -196,8 +279,14 @@ func (m *CAManager) generateAndSaveCA() (*tls.Certificate, error) {
 		os.Remove(m.certPath)
 		return nil, fmt.Errorf("write key: %w", err)
 	}
+	// Ensure permissions are correct even if file existed with different perms
+	if err := os.Chmod(m.keyPath, 0600); err != nil {
+		os.Remove(m.certPath)
+		os.Remove(m.keyPath)
+		return nil, fmt.Errorf("chmod key: %w", err)
+	}
 
-	log.Printf("[INFO] CA certificate saved to %s (valid for %d days)", m.certPath, validityDays)
+	log.Printf("[INFO] CA certificate saved to %s (valid for %d days)", sanitizePath(m.certPath), validityDays)
 
 	// Load the saved certificate
 	cert, err := tls.LoadX509KeyPair(m.certPath, m.keyPath)
@@ -205,6 +294,158 @@ func (m *CAManager) generateAndSaveCA() (*tls.Certificate, error) {
 		return nil, fmt.Errorf("load generated CA: %w", err)
 	}
 
+	m.certMu.Lock()
 	m.cert = &cert
+	m.certMu.Unlock()
 	return &cert, nil
+}
+
+// StartWatcher starts watching CA files for changes (external mode only).
+// Returns nil if not in external mode. Safe to call multiple times.
+func (m *CAManager) StartWatcher() error {
+	if !m.external {
+		return nil
+	}
+
+	m.watcherMu.Lock()
+	defer m.watcherMu.Unlock()
+
+	if m.watcherInit {
+		return nil // Already running
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("create watcher: %w", err)
+	}
+
+	// Watch the directory containing the cert (handles k8s secret updates)
+	dir := filepath.Dir(m.certPath)
+	if err := watcher.Add(dir); err != nil {
+		watcher.Close()
+		return fmt.Errorf("watch directory %s: %w", sanitizePath(dir), err)
+	}
+
+	m.watcher = watcher
+	m.stopCh = make(chan struct{})
+	m.watcherInit = true
+
+	// Capture references for goroutine to avoid races with StopWatcher
+	stopCh := m.stopCh
+	events := watcher.Events
+	errors := watcher.Errors
+
+	m.watcherWg.Add(1)
+	go m.watchLoop(stopCh, events, errors)
+
+	log.Printf("[INFO] CA file watcher started for %s", sanitizePath(dir))
+	return nil
+}
+
+// StopWatcher stops the file watcher. Safe to call multiple times.
+func (m *CAManager) StopWatcher() {
+	m.watcherMu.Lock()
+	if !m.watcherInit {
+		m.watcherMu.Unlock()
+		return
+	}
+
+	// Signal stop and mark as not initialized
+	if m.stopCh != nil {
+		close(m.stopCh)
+		m.stopCh = nil
+	}
+	m.watcherInit = false
+	watcher := m.watcher
+	m.watcher = nil
+	m.watcherMu.Unlock()
+
+	// Wait outside lock to avoid deadlock with watchLoop
+	m.watcherWg.Wait()
+
+	if watcher != nil {
+		watcher.Close()
+	}
+}
+
+func (m *CAManager) watchLoop(stopCh <-chan struct{}, events <-chan fsnotify.Event, errors <-chan error) {
+	defer m.watcherWg.Done()
+
+	certFile := filepath.Base(m.certPath)
+	keyFile := filepath.Base(m.keyPath)
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+
+			// Check if this event is relevant:
+			// - Direct file changes (tls.crt, tls.key, ca.crt, ca.key)
+			// - k8s secret symlink updates (..data symlink change)
+			eventFile := filepath.Base(event.Name)
+			isRelevantFile := eventFile == certFile || eventFile == keyFile
+			isK8sSymlink := eventFile == "..data" // k8s atomic secret update
+
+			if !isRelevantFile && !isK8sSymlink {
+				continue
+			}
+
+			// React to write, create, or chmod events
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Chmod) == 0 {
+				continue
+			}
+
+			// Reload the certificate
+			if err := m.reloadCA(); err != nil {
+				log.Printf("[WARN] CA reload failed: %v", err)
+			} else {
+				log.Printf("[INFO] CA certificate reloaded")
+			}
+
+		case err, ok := <-errors:
+			if !ok {
+				return
+			}
+			log.Printf("[WARN] CA watcher error: %v", err)
+		}
+	}
+}
+
+func (m *CAManager) reloadCA() error {
+	cert, err := m.loadCA()
+	if err != nil {
+		return err
+	}
+
+	if err := m.validateCA(cert); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	m.certMu.Lock()
+	m.cert = cert
+	m.certMu.Unlock()
+
+	return nil
+}
+
+// External returns whether this CA is externally managed.
+func (m *CAManager) External() bool {
+	return m.external
+}
+
+// sanitizePath removes control characters from a path for safe logging.
+func sanitizePath(path string) string {
+	var result []rune
+	for _, r := range path {
+		if r < 32 || r == 127 {
+			result = append(result, '?')
+		} else {
+			result = append(result, r)
+		}
+	}
+	return string(result)
 }

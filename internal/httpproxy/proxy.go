@@ -4,6 +4,7 @@ package httpproxy
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -150,8 +151,14 @@ func (p *Proxy) Start(addr string) error {
 		return fmt.Errorf("setup MITM: %w", err)
 	}
 
+	// Start file watcher for external CA hot-reload
+	if err := p.ca.StartWatcher(); err != nil {
+		return fmt.Errorf("start CA watcher: %w", err)
+	}
+
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
+		p.ca.StopWatcher() // Clean up watcher if listen fails
 		return fmt.Errorf("listen: %w", err)
 	}
 	p.listener = listener
@@ -181,14 +188,34 @@ func (p *Proxy) setupMITM() error {
 		return fmt.Errorf("ensure CA: %w", err)
 	}
 
-	// Set the CA for goproxy
+	// Set the CA for goproxy (required for some internal checks)
 	goproxy.GoproxyCa = *cert
-	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(cert)}
-	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(cert)}
-	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: goproxy.TLSConfigFromCA(cert)}
+
+	// Use lazy TLSConfig that reads fresh cert on each CONNECT.
+	// This enables hot-reload: when CAManager reloads cert from disk,
+	// new HTTPS connections automatically use the updated certificate.
+	lazyTLSConfig := p.makeLazyTLSConfig()
+	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: lazyTLSConfig}
+	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: lazyTLSConfig}
+	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: lazyTLSConfig}
 
 	log.Printf("[INFO] MITM enabled with CA from %s", p.ca.CertPath())
 	return nil
+}
+
+// makeLazyTLSConfig returns a TLS config function that reads the latest
+// certificate from CAManager on each call. This enables hot-reload of
+// CA certificates without restarting the proxy.
+func (p *Proxy) makeLazyTLSConfig() func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
+	return func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
+		cert := p.ca.Certificate()
+		if cert == nil {
+			return nil, fmt.Errorf("CA certificate not loaded")
+		}
+		// Delegate to goproxy's standard TLSConfigFromCA which generates
+		// per-domain certificates signed by the CA
+		return goproxy.TLSConfigFromCA(cert)(host, ctx)
+	}
 }
 
 // CAPath returns the path to the CA certificate for trust injection.
@@ -201,6 +228,9 @@ func (p *Proxy) Stop() error {
 	var err error
 	p.stopOnce.Do(func() {
 		close(p.shutdownCh)
+
+		// Stop CA file watcher
+		p.ca.StopWatcher()
 
 		if p.listener != nil {
 			if closeErr := p.listener.Close(); closeErr != nil {

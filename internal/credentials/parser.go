@@ -10,11 +10,11 @@ import (
 type Backend string
 
 const (
-	BackendPass     Backend = "pass"
-	BackendEnv      Backend = "env"
+	BackendPass      Backend = "pass"
+	BackendEnv       Backend = "env"
 	Backend1Password Backend = "op"
-	BackendAge      Backend = "age"
-	BackendKeychain Backend = "keychain"
+	BackendAge       Backend = "age"
+	BackendKeychain  Backend = "keychain"
 	BackendBitwarden Backend = "bw"
 )
 

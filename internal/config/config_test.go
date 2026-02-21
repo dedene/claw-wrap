@@ -1706,3 +1706,136 @@ func TestAuditConfig_BoolDefaults(t *testing.T) {
 		t.Error("GetIncludeDuration() should be false when explicitly set")
 	}
 }
+
+// --- CAConfig tests ---
+
+func TestCAConfig_DefaultFilenames(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			CA: CAConfig{
+				Path: "/etc/claw/ca",
+				// No CertFile or KeyFile specified
+			},
+		},
+	}
+
+	if got := cfg.GetHTTPProxyCACertFile(); got != "ca.crt" {
+		t.Errorf("GetHTTPProxyCACertFile() = %q, want ca.crt", got)
+	}
+	if got := cfg.GetHTTPProxyCAKeyFile(); got != "ca.key" {
+		t.Errorf("GetHTTPProxyCAKeyFile() = %q, want ca.key", got)
+	}
+}
+
+func TestCAConfig_CustomFilenames(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			CA: CAConfig{
+				Path:     "/etc/claw/ca",
+				CertFile: "tls.crt",
+				KeyFile:  "tls.key",
+			},
+		},
+	}
+
+	if got := cfg.GetHTTPProxyCACertFile(); got != "tls.crt" {
+		t.Errorf("GetHTTPProxyCACertFile() = %q, want tls.crt", got)
+	}
+	if got := cfg.GetHTTPProxyCAKeyFile(); got != "tls.key" {
+		t.Errorf("GetHTTPProxyCAKeyFile() = %q, want tls.key", got)
+	}
+}
+
+func TestCAConfig_ExternalMode(t *testing.T) {
+	cfg := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			CA: CAConfig{
+				Path:     "/etc/claw/ca",
+				External: true,
+			},
+		},
+	}
+
+	if !cfg.GetHTTPProxyCAExternal() {
+		t.Error("GetHTTPProxyCAExternal() = false, want true")
+	}
+
+	// Default is false
+	cfg2 := &Config{
+		HTTPProxy: &HTTPProxyConfig{
+			CA: CAConfig{
+				Path: "/etc/claw/ca",
+			},
+		},
+	}
+	if cfg2.GetHTTPProxyCAExternal() {
+		t.Error("GetHTTPProxyCAExternal() default = true, want false")
+	}
+}
+
+func TestCAConfig_NilHTTPProxy(t *testing.T) {
+	cfg := &Config{}
+
+	if got := cfg.GetHTTPProxyCACertFile(); got != "ca.crt" {
+		t.Errorf("GetHTTPProxyCACertFile() with nil HTTPProxy = %q, want ca.crt", got)
+	}
+	if got := cfg.GetHTTPProxyCAKeyFile(); got != "ca.key" {
+		t.Errorf("GetHTTPProxyCAKeyFile() with nil HTTPProxy = %q, want ca.key", got)
+	}
+	if cfg.GetHTTPProxyCAExternal() {
+		t.Error("GetHTTPProxyCAExternal() with nil HTTPProxy = true, want false")
+	}
+}
+
+// --- CA filename validation (path traversal prevention) ---
+
+func TestCAConfig_FilenameValidation_PathTraversal(t *testing.T) {
+	tests := []struct {
+		name     string
+		certFile string
+		keyFile  string
+		wantErr  bool
+	}{
+		{"valid defaults", "", "", false},
+		{"valid custom", "tls.crt", "tls.key", false},
+		{"path traversal cert", "../../../etc/passwd", "key.pem", true},
+		{"path traversal key", "cert.pem", "../secret.key", true},
+		{"absolute path cert", "/etc/ssl/ca.crt", "ca.key", true},
+		{"directory in cert", "foo/bar.crt", "ca.key", true},
+		{"dot filename", ".", "ca.key", true},
+		{"dotdot filename", "..", "ca.key", true},
+		{"backslash path", "foo\\bar.crt", "ca.key", true},
+		{"nul byte cert", "ca\x00.crt", "ca.key", true},
+		{"control char cert", "ca\n.crt", "ca.key", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Credentials: map[string]CredentialDef{
+					"test": {Source: "env:TEST"},
+				},
+				HTTPProxy: &HTTPProxyConfig{
+					Enabled: true,
+					CA: CAConfig{
+						Path:     "/tmp/ca",
+						CertFile: tt.certFile,
+						KeyFile:  tt.keyFile,
+					},
+					Routes: []ProxyRoute{
+						{Host: "api.example.com", Inject: InjectSpec{Header: "X-Api-Key", Value: "{{test}}"}},
+					},
+				},
+			}
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr && err != nil {
+				if !strings.Contains(err.Error(), "ca.cert_file") && !strings.Contains(err.Error(), "ca.key_file") {
+					t.Errorf("error should mention ca.cert_file or ca.key_file, got: %v", err)
+				}
+			}
+		})
+	}
+}
