@@ -61,7 +61,7 @@ type ProxyConfig struct {
 	CredentialCacheTTL    string `yaml:"credential_cache_ttl"` // e.g., "30s" (0/empty disables)
 	VaultBinary           string `yaml:"vault_binary"`         // e.g., "/usr/bin/vault"
 	VaultAddr             string `yaml:"vault_addr"`           // e.g., "https://127.0.0.1:8200"
-	VaultSkipVerify       bool   `yaml:"vault_skip_verify"`    // skip TLS verification
+	VaultSkipVerify       *bool  `yaml:"vault_skip_verify"`    // skip TLS verification (nil = inherit env)
 	VaultCACert           string `yaml:"vault_cacert"`         // e.g., "/path/to/ca.pem"
 	VaultNamespace        string `yaml:"vault_namespace"`      // enterprise namespace
 	VaultTokenFile        string `yaml:"vault_token_file"`     // override default ~/.vault-token
@@ -853,8 +853,12 @@ func (c *Config) GetVaultAddr() string {
 }
 
 // GetVaultSkipVerify returns whether to skip Vault TLS verification.
-func (c *Config) GetVaultSkipVerify() bool {
-	return c.Proxy != nil && c.Proxy.VaultSkipVerify
+// nil = not configured (inherit ambient env), non-nil = explicit override.
+func (c *Config) GetVaultSkipVerify() *bool {
+	if c.Proxy != nil {
+		return c.Proxy.VaultSkipVerify
+	}
+	return nil
 }
 
 // GetVaultCACert returns the Vault CA cert path (empty = use VAULT_CACERT env).

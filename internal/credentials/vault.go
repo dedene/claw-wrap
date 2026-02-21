@@ -19,7 +19,7 @@ const vaultCommandTimeout = 30 * time.Second
 var (
 	vaultMu         sync.RWMutex
 	vaultAddr       string
-	vaultSkipVerify bool
+	vaultSkipVerify *bool
 	vaultCACert     string
 	vaultNamespace  string
 	vaultTokenFile  string
@@ -33,7 +33,8 @@ func SetVaultAddr(addr string) {
 }
 
 // SetVaultSkipVerify configures TLS verification skip.
-func SetVaultSkipVerify(skip bool) {
+// nil = inherit ambient env, non-nil = override.
+func SetVaultSkipVerify(skip *bool) {
 	vaultMu.Lock()
 	defer vaultMu.Unlock()
 	vaultSkipVerify = skip
@@ -60,7 +61,7 @@ func SetVaultTokenFile(path string) {
 	vaultTokenFile = path
 }
 
-func getVaultSettings() (addr string, skipVerify bool, caCert, namespace, tokenFile string) {
+func getVaultSettings() (addr string, skipVerify *bool, caCert, namespace, tokenFile string) {
 	vaultMu.RLock()
 	defer vaultMu.RUnlock()
 	return vaultAddr, vaultSkipVerify, vaultCACert, vaultNamespace, vaultTokenFile
@@ -76,7 +77,7 @@ func fetchFromVault(ctx context.Context, parsed *ParsedSource, vaultBinaryOverri
 	ctx, cancel := context.WithTimeout(ctx, vaultCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, vaultBinary, "kv", "get", "-format=json", parsed.Path)
+	cmd := exec.CommandContext(ctx, vaultBinary, "kv", "get", "-format=json", "--", parsed.Path)
 	cmd.Env = vaultEnv()
 
 	output, err := cmd.Output()
@@ -135,15 +136,48 @@ func resolveVaultBinary(vaultBinaryOverride string) (string, error) {
 }
 
 // vaultEnv returns environment variables for the vault CLI.
+// Configured values override any ambient VAULT_* env vars; unconfigured
+// fields (empty string / nil) inherit from the process environment.
 func vaultEnv() []string {
-	env := os.Environ()
 	addr, skipVerify, caCert, namespace, tokenFile := getVaultSettings()
 
+	// Collect keys that will be overridden so we can strip them.
+	strip := make(map[string]bool)
+	if addr != "" {
+		strip["VAULT_ADDR"] = true
+	}
+	if skipVerify != nil {
+		strip["VAULT_SKIP_VERIFY"] = true
+	}
+	if caCert != "" {
+		strip["VAULT_CACERT"] = true
+	}
+	if namespace != "" {
+		strip["VAULT_NAMESPACE"] = true
+	}
+	if tokenFile != "" {
+		strip["VAULT_TOKEN_FILE"] = true
+	}
+
+	// Copy ambient env, filtering out keys we're about to set.
+	env := make([]string, 0, len(os.Environ())+len(strip))
+	for _, e := range os.Environ() {
+		key, _, _ := strings.Cut(e, "=")
+		if !strip[key] {
+			env = append(env, e)
+		}
+	}
+
+	// Append configured overrides.
 	if addr != "" {
 		env = append(env, "VAULT_ADDR="+addr)
 	}
-	if skipVerify {
-		env = append(env, "VAULT_SKIP_VERIFY=1")
+	if skipVerify != nil {
+		if *skipVerify {
+			env = append(env, "VAULT_SKIP_VERIFY=1")
+		} else {
+			env = append(env, "VAULT_SKIP_VERIFY=0")
+		}
 	}
 	if caCert != "" {
 		env = append(env, "VAULT_CACERT="+caCert)

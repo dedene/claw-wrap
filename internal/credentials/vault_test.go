@@ -178,6 +178,8 @@ func TestFetchFromVault_InvalidJSON(t *testing.T) {
 	}
 }
 
+func boolPtr(v bool) *bool { return &v }
+
 func TestVaultEnv(t *testing.T) {
 	// Save originals
 	origAddr, origSkip, origCACert, origNs, origTokenFile := getVaultSettings()
@@ -190,7 +192,7 @@ func TestVaultEnv(t *testing.T) {
 	}()
 
 	SetVaultAddr("https://vault.example.com:8200")
-	SetVaultSkipVerify(true)
+	SetVaultSkipVerify(boolPtr(true))
 	SetVaultCACert("/etc/vault/ca.pem")
 	SetVaultNamespace("team-a")
 	SetVaultTokenFile("/home/bot/.vault-token")
@@ -219,7 +221,32 @@ func TestVaultEnv(t *testing.T) {
 	}
 }
 
-func TestVaultEnv_Empty(t *testing.T) {
+func TestVaultEnv_ExplicitFalse(t *testing.T) {
+	origAddr, origSkip, origCACert, origNs, origTokenFile := getVaultSettings()
+	defer func() {
+		SetVaultAddr(origAddr)
+		SetVaultSkipVerify(origSkip)
+		SetVaultCACert(origCACert)
+		SetVaultNamespace(origNs)
+		SetVaultTokenFile(origTokenFile)
+	}()
+
+	SetVaultSkipVerify(boolPtr(false))
+
+	env := vaultEnv()
+	found := false
+	for _, e := range env {
+		if e == "VAULT_SKIP_VERIFY=0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("vaultEnv() should set VAULT_SKIP_VERIFY=0 when explicitly false")
+	}
+}
+
+func TestVaultEnv_NilSkipVerify(t *testing.T) {
 	origAddr, origSkip, origCACert, origNs, origTokenFile := getVaultSettings()
 	defer func() {
 		SetVaultAddr(origAddr)
@@ -230,16 +257,15 @@ func TestVaultEnv_Empty(t *testing.T) {
 	}()
 
 	SetVaultAddr("")
-	SetVaultSkipVerify(false)
+	SetVaultSkipVerify(nil)
 	SetVaultCACert("")
 	SetVaultNamespace("")
 	SetVaultTokenFile("")
 
 	env := vaultEnv()
 
-	// Count how many times each vault key appears — our setters should add zero.
-	// Ambient env may already contain VAULT_* vars (e.g. from a real Vault session),
-	// so we compare counts before and after to isolate what vaultEnv() appended.
+	// With nil skip and empty strings, vaultEnv() should not add any VAULT_* keys.
+	// Ambient env may already have them, but vaultEnv() shouldn't strip or add.
 	baseEnv := os.Environ()
 	baseCount := make(map[string]int)
 	vaultKeys := []string{"VAULT_ADDR", "VAULT_SKIP_VERIFY", "VAULT_CACERT", "VAULT_NAMESPACE", "VAULT_TOKEN_FILE"}
@@ -261,9 +287,44 @@ func TestVaultEnv_Empty(t *testing.T) {
 	}
 
 	for _, key := range vaultKeys {
-		if envCount[key] > baseCount[key] {
-			t.Errorf("vaultEnv() should not append %s when empty (base=%d, got=%d)", key, baseCount[key], envCount[key])
+		if envCount[key] != baseCount[key] {
+			t.Errorf("vaultEnv() should not change %s count when unconfigured (base=%d, got=%d)", key, baseCount[key], envCount[key])
 		}
+	}
+}
+
+func TestVaultEnv_OverridesAmbient(t *testing.T) {
+	origAddr, origSkip, origCACert, origNs, origTokenFile := getVaultSettings()
+	defer func() {
+		SetVaultAddr(origAddr)
+		SetVaultSkipVerify(origSkip)
+		SetVaultCACert(origCACert)
+		SetVaultNamespace(origNs)
+		SetVaultTokenFile(origTokenFile)
+	}()
+
+	// Set ambient VAULT_ADDR, then override via config
+	t.Setenv("VAULT_ADDR", "https://old.example.com")
+	SetVaultAddr("https://new.example.com")
+	SetVaultSkipVerify(nil)
+	SetVaultCACert("")
+	SetVaultNamespace("")
+	SetVaultTokenFile("")
+
+	env := vaultEnv()
+
+	// Should have exactly one VAULT_ADDR with the new value
+	count := 0
+	for _, e := range env {
+		if e == "VAULT_ADDR=https://new.example.com" {
+			count++
+		}
+		if e == "VAULT_ADDR=https://old.example.com" {
+			t.Error("vaultEnv() should have stripped ambient VAULT_ADDR")
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 VAULT_ADDR entry, got %d", count)
 	}
 }
 

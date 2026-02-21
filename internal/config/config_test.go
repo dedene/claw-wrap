@@ -702,22 +702,34 @@ func TestGetVaultAddr(t *testing.T) {
 }
 
 func TestGetVaultSkipVerify(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  Config
-		want bool
-	}{
-		{"nil proxy", Config{}, false},
-		{"default false", Config{Proxy: &ProxyConfig{}}, false},
-		{"configured true", Config{Proxy: &ProxyConfig{VaultSkipVerify: true}}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.GetVaultSkipVerify(); got != tt.want {
-				t.Errorf("GetVaultSkipVerify() = %v, want %v", got, tt.want)
-			}
-		})
-	}
+	boolPtr := func(v bool) *bool { return &v }
+
+	t.Run("nil proxy", func(t *testing.T) {
+		cfg := Config{}
+		if got := cfg.GetVaultSkipVerify(); got != nil {
+			t.Errorf("GetVaultSkipVerify() = %v, want nil", *got)
+		}
+	})
+	t.Run("unset returns nil", func(t *testing.T) {
+		cfg := Config{Proxy: &ProxyConfig{}}
+		if got := cfg.GetVaultSkipVerify(); got != nil {
+			t.Errorf("GetVaultSkipVerify() = %v, want nil", *got)
+		}
+	})
+	t.Run("explicit true", func(t *testing.T) {
+		cfg := Config{Proxy: &ProxyConfig{VaultSkipVerify: boolPtr(true)}}
+		got := cfg.GetVaultSkipVerify()
+		if got == nil || !*got {
+			t.Errorf("GetVaultSkipVerify() = %v, want *true", got)
+		}
+	})
+	t.Run("explicit false", func(t *testing.T) {
+		cfg := Config{Proxy: &ProxyConfig{VaultSkipVerify: boolPtr(false)}}
+		got := cfg.GetVaultSkipVerify()
+		if got == nil || *got {
+			t.Errorf("GetVaultSkipVerify() = %v, want *false", got)
+		}
+	})
 }
 
 func TestGetVaultCACert(t *testing.T) {
