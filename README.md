@@ -99,7 +99,7 @@ claw-wrap supports two approaches for credential injection:
 | [age](https://age-encryption.org/) | `age:` | `age:/path/to/file.age` | File-level encryption |
 | [HashiCorp Vault](https://www.vaultproject.io/) | `vault:` | `vault:secret/myapp/key` | KV-v1 & KV-v2, external auth |
 
-All backends except `env:` support jq extraction: `vault:secret/app/creds \| .password`
+All backends except `env:` support jq extraction: `vault:secret/app/creds | .password`
 
 ## Quick Start
 
