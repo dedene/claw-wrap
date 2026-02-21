@@ -524,7 +524,8 @@ func (e *ToolExecutor) startProcessWithPTY(env []string) error {
 	}
 	e.ptyMaster = ptmx
 
-	// Get process group ID (process is its own leader in PTY mode)
+	// Get process group ID. pty.Start() calls Setsid() internally,
+	// making the child its own session leader and process group leader.
 	e.pgid = e.cmd.Process.Pid
 
 	// Set initial window size if provided

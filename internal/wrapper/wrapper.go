@@ -242,6 +242,8 @@ func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd
 		// Fall back to regular mode if raw mode fails
 		return w.ioLoop(conn, ndjson)
 	}
+	// Restore terminal on all exit paths. Note: os.Exit() doesn't run defers,
+	// so we call Restore explicitly before os.Exit and use defer for error returns.
 	defer term.Restore(stdinFd, oldState)
 
 	decoder := framing.NewDecoder(conn)
@@ -313,7 +315,7 @@ func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd
 			if done {
 				exitCode = msg.ExitCode
 				close(doneCh)
-				// Restore terminal before exit
+				// Restore terminal before os.Exit (defers don't run on os.Exit)
 				term.Restore(stdinFd, oldState)
 				os.Exit(exitCode)
 			}
