@@ -185,8 +185,17 @@ type ToolDef struct {
 	AllowedArgs  []BlockedArg      `yaml:"allowed_args,omitempty"`
 	RedactOutput []ToolRedactRule  `yaml:"redact_output,omitempty"`
 	ConfigFile   *ConfigFileDef    `yaml:"config_file,omitempty"`
-	UseProxy     bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
-	UsePTY       bool              `yaml:"use_pty,omitempty"`   // Enable PTY mode for interactive TUI apps
+	UseProxy bool  `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
+	UsePTY   *bool `yaml:"use_pty,omitempty"`   // PTY mode: nil=default on, false=opt out
+}
+
+// GetUsePTY returns whether PTY mode is enabled for this tool.
+// Defaults to true when not explicitly configured.
+func (t ToolDef) GetUsePTY() bool {
+	if t.UsePTY == nil {
+		return true
+	}
+	return *t.UsePTY
 }
 
 // ToolRedactRule defines an output redaction rule for tool stdout/stderr.

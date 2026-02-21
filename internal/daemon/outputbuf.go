@@ -86,8 +86,8 @@ func (b *OutputBuffer) writeLocked(data []byte) error {
 		}
 	}
 
-	// Check if this write would exceed the threshold
-	if b.inlineMode && b.accumulated+int64(len(data)) > b.threshold {
+	// Check if this write would exceed the threshold (threshold <= 0 means always inline)
+	if b.inlineMode && b.threshold > 0 && b.accumulated+int64(len(data)) > b.threshold {
 		// Switch to file mode
 		if err := b.switchToFileMode(); err != nil {
 			return fmt.Errorf("switch to file mode: %w", err)

@@ -327,7 +327,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 	}
 
 	// Apply terminal fallback after all env merges.
-	effectivePTY := e.req.UsePTY && e.tool.UsePTY
+	effectivePTY := e.req.UsePTY && e.tool.GetUsePTY()
 	termValue := strings.TrimSpace(envMap["TERM"])
 	if termValue == "" {
 		if effectivePTY {
@@ -463,7 +463,7 @@ func (e *ToolExecutor) setupConfigFile() error {
 // If PTY mode is enabled, delegates to startProcessWithPTY.
 func (e *ToolExecutor) startProcess(env []string) error {
 	// Check if PTY mode should be used
-	e.usePTY = e.req.UsePTY && e.tool.UsePTY
+	e.usePTY = e.req.UsePTY && e.tool.GetUsePTY()
 	if e.usePTY {
 		return e.startProcessWithPTY(env)
 	}
@@ -536,8 +536,20 @@ func (e *ToolExecutor) startProcessWithPTY(env []string) error {
 	e.cmd.Dir = e.req.Cwd
 	e.cmd.Env = env
 
-	// Start with PTY - pty.Start handles setting up stdin/stdout/stderr
-	ptmx, err := pty.Start(e.cmd)
+	// Start with PTY, using initial window size if provided so the child
+	// process sees the correct dimensions from the very first ioctl.
+	var (
+		ptmx *os.File
+		err  error
+	)
+	if e.req.WindowSize != nil {
+		ptmx, err = pty.StartWithSize(e.cmd, &pty.Winsize{
+			Rows: e.req.WindowSize.Rows,
+			Cols: e.req.WindowSize.Cols,
+		})
+	} else {
+		ptmx, err = pty.Start(e.cmd)
+	}
 	if err != nil {
 		return fmt.Errorf("pty start: %w", err)
 	}
@@ -546,16 +558,6 @@ func (e *ToolExecutor) startProcessWithPTY(env []string) error {
 	// Get process group ID. pty.Start() calls Setsid() internally,
 	// making the child its own session leader and process group leader.
 	e.pgid = e.cmd.Process.Pid
-
-	// Set initial window size if provided
-	if e.req.WindowSize != nil {
-		if err := pty.Setsize(ptmx, &pty.Winsize{
-			Rows: e.req.WindowSize.Rows,
-			Cols: e.req.WindowSize.Cols,
-		}); err != nil {
-			log.Printf("[WARN] set initial window size: %v", err)
-		}
-	}
 
 	// Create single output buffer for PTY (stdout and stderr are merged)
 	// PTY mode always streams inline - no file buffering threshold

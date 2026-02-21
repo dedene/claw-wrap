@@ -947,15 +947,17 @@ func TestValidate_FullValidConfig(t *testing.T) {
 }
 
 func TestValidate_UsePTY_ValidConfig(t *testing.T) {
+	boolTrue := true
+	boolFalse := false
 	cfg := &Config{
 		Tools: map[string]ToolDef{
 			"vim": {
 				Binary: "/usr/bin/vim",
-				UsePTY: true,
+				UsePTY: &boolTrue,
 			},
 			"grep": {
 				Binary: "/usr/bin/grep",
-				UsePTY: false,
+				UsePTY: &boolFalse,
 			},
 		},
 	}
@@ -964,12 +966,11 @@ func TestValidate_UsePTY_ValidConfig(t *testing.T) {
 		t.Errorf("Validate() unexpected error for PTY config: %v", err)
 	}
 
-	// Verify the flag is preserved
-	if !cfg.Tools["vim"].UsePTY {
-		t.Error("UsePTY should be true for vim")
+	if !cfg.Tools["vim"].GetUsePTY() {
+		t.Error("GetUsePTY() should be true for vim")
 	}
-	if cfg.Tools["grep"].UsePTY {
-		t.Error("UsePTY should be false for grep")
+	if cfg.Tools["grep"].GetUsePTY() {
+		t.Error("GetUsePTY() should be false for grep")
 	}
 }
 
@@ -981,6 +982,9 @@ tools:
     use_pty: true
   grep:
     binary: /usr/bin/grep
+  cat:
+    binary: /usr/bin/cat
+    use_pty: false
 `
 	tmpFile, err := os.CreateTemp("", "config-pty-*.yaml")
 	if err != nil {
@@ -998,11 +1002,14 @@ tools:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if !cfg.Tools["vim"].UsePTY {
-		t.Error("UsePTY should be true for vim (from YAML)")
+	if !cfg.Tools["vim"].GetUsePTY() {
+		t.Error("GetUsePTY() should be true for vim (explicit true)")
 	}
-	if cfg.Tools["grep"].UsePTY {
-		t.Error("UsePTY should default to false for grep")
+	if !cfg.Tools["grep"].GetUsePTY() {
+		t.Error("GetUsePTY() should default to true for grep (not set)")
+	}
+	if cfg.Tools["cat"].GetUsePTY() {
+		t.Error("GetUsePTY() should be false for cat (explicit false)")
 	}
 }
 

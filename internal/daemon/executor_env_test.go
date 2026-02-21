@@ -503,9 +503,7 @@ func TestBuildEnvironment_PTYFallbackTerm(t *testing.T) {
 		req: &protocol.ProxyRequest{
 			UsePTY: true,
 		},
-		tool: &config.ToolDef{
-			UsePTY: true,
-		},
+		tool: &config.ToolDef{},
 		cfg: &config.Config{},
 	}
 
@@ -530,9 +528,7 @@ func TestBuildEnvironment_NonPTYFallbackTerm(t *testing.T) {
 		req: &protocol.ProxyRequest{
 			UsePTY: false,
 		},
-		tool: &config.ToolDef{
-			UsePTY: true,
-		},
+		tool: &config.ToolDef{},
 		cfg: &config.Config{},
 	}
 
@@ -557,9 +553,7 @@ func TestBuildEnvironment_UpgradesInheritedDumbInPTY(t *testing.T) {
 		req: &protocol.ProxyRequest{
 			UsePTY: true,
 		},
-		tool: &config.ToolDef{
-			UsePTY: true,
-		},
+		tool: &config.ToolDef{},
 		cfg: &config.Config{},
 	}
 
@@ -587,9 +581,7 @@ func TestBuildEnvironment_ReqTermPreservedInPTY(t *testing.T) {
 				"TERM": "screen-256color",
 			},
 		},
-		tool: &config.ToolDef{
-			UsePTY: true,
-		},
+		tool: &config.ToolDef{},
 		cfg: &config.Config{},
 	}
 
