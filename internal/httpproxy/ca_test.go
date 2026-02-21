@@ -472,19 +472,23 @@ func TestCAManager_Watcher_ReloadsOnChange(t *testing.T) {
 	// Replace with new CA
 	createTestCA(t, tmpDir, "ca.crt", "ca.key")
 
-	// Wait for watcher to pick up change
-	time.Sleep(200 * time.Millisecond)
-
-	// Check if cert was reloaded
-	cert2 := mgr.Certificate()
-	if cert2 == nil {
-		t.Fatal("Certificate() returned nil after reload")
+	// Poll for certificate change with timeout (avoid flaky fixed sleep)
+	deadline := time.Now().Add(2 * time.Second)
+	var reloaded bool
+	for time.Now().Before(deadline) {
+		cert2 := mgr.Certificate()
+		if cert2 != nil {
+			x509Cert2, _ := x509.ParseCertificate(cert2.Certificate[0])
+			if origSerial.Cmp(x509Cert2.SerialNumber) != 0 {
+				reloaded = true
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	x509Cert2, _ := x509.ParseCertificate(cert2.Certificate[0])
-	newSerial := x509Cert2.SerialNumber
 
-	if origSerial.Cmp(newSerial) == 0 {
-		t.Error("certificate serial unchanged, watcher may not have reloaded")
+	if !reloaded {
+		t.Error("certificate serial unchanged after 2s, watcher may not have reloaded")
 	}
 }
 

@@ -45,8 +45,9 @@ type CAManager struct {
 	watcher     *fsnotify.Watcher // file watcher for external mode
 	stopCh      chan struct{}     // stop signal for watcher goroutine
 	watcherWg   sync.WaitGroup    // wait for watcher goroutine to exit
-	stopOnce    sync.Once         // ensure StopWatcher only runs once
+	watcherMu   sync.Mutex        // protects watcher lifecycle (start/stop)
 	watcherInit bool              // true if watcher was started
+	permLogOnce sync.Once         // ensures permission relaxation logged only once
 }
 
 // NewCAManager creates a new CA manager with the given configuration.
@@ -199,7 +200,9 @@ func (m *CAManager) loadCA() (*tls.Certificate, error) {
 			return nil, fmt.Errorf("CA key has insecure permissions %04o (want 0600 or stricter)", perm)
 		}
 	} else {
-		log.Printf("[INFO] External CA mode: key permission check relaxed (k8s compat)")
+		m.permLogOnce.Do(func() {
+			log.Printf("[INFO] External CA mode: key permission check relaxed (k8s compat)")
+		})
 	}
 
 	cert, err := tls.LoadX509KeyPair(m.certPath, m.keyPath)
@@ -298,10 +301,17 @@ func (m *CAManager) generateAndSaveCA() (*tls.Certificate, error) {
 }
 
 // StartWatcher starts watching CA files for changes (external mode only).
-// Returns nil if not in external mode.
+// Returns nil if not in external mode. Safe to call multiple times.
 func (m *CAManager) StartWatcher() error {
 	if !m.external {
 		return nil
+	}
+
+	m.watcherMu.Lock()
+	defer m.watcherMu.Unlock()
+
+	if m.watcherInit {
+		return nil // Already running
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -319,10 +329,14 @@ func (m *CAManager) StartWatcher() error {
 	m.watcher = watcher
 	m.stopCh = make(chan struct{})
 	m.watcherInit = true
-	m.stopOnce = sync.Once{} // Reset for potential restart
+
+	// Capture references for goroutine to avoid races with StopWatcher
+	stopCh := m.stopCh
+	events := watcher.Events
+	errors := watcher.Errors
 
 	m.watcherWg.Add(1)
-	go m.watchLoop()
+	go m.watchLoop(stopCh, events, errors)
 
 	log.Printf("[INFO] CA file watcher started for %s", sanitizePath(dir))
 	return nil
@@ -330,27 +344,31 @@ func (m *CAManager) StartWatcher() error {
 
 // StopWatcher stops the file watcher. Safe to call multiple times.
 func (m *CAManager) StopWatcher() {
+	m.watcherMu.Lock()
 	if !m.watcherInit {
+		m.watcherMu.Unlock()
 		return
 	}
 
-	m.stopOnce.Do(func() {
-		if m.stopCh != nil {
-			close(m.stopCh)
-		}
-		// Wait for watchLoop to exit before closing watcher
-		m.watcherWg.Wait()
-
-		if m.watcher != nil {
-			m.watcher.Close()
-			m.watcher = nil
-		}
+	// Signal stop and mark as not initialized
+	if m.stopCh != nil {
+		close(m.stopCh)
 		m.stopCh = nil
-		m.watcherInit = false
-	})
+	}
+	m.watcherInit = false
+	watcher := m.watcher
+	m.watcher = nil
+	m.watcherMu.Unlock()
+
+	// Wait outside lock to avoid deadlock with watchLoop
+	m.watcherWg.Wait()
+
+	if watcher != nil {
+		watcher.Close()
+	}
 }
 
-func (m *CAManager) watchLoop() {
+func (m *CAManager) watchLoop(stopCh <-chan struct{}, events <-chan fsnotify.Event, errors <-chan error) {
 	defer m.watcherWg.Done()
 
 	certFile := filepath.Base(m.certPath)
@@ -358,9 +376,9 @@ func (m *CAManager) watchLoop() {
 
 	for {
 		select {
-		case <-m.stopCh:
+		case <-stopCh:
 			return
-		case event, ok := <-m.watcher.Events:
+		case event, ok := <-events:
 			if !ok {
 				return
 			}
@@ -388,7 +406,7 @@ func (m *CAManager) watchLoop() {
 				log.Printf("[INFO] CA certificate reloaded")
 			}
 
-		case err, ok := <-m.watcher.Errors:
+		case err, ok := <-errors:
 			if !ok {
 				return
 			}

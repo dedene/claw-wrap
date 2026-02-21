@@ -362,10 +362,27 @@ Log verbosity: `none`, `errors` (default), `info`, `debug`.
 CA certificate configuration for MITM TLS termination:
 
 - `path`: Directory for CA cert/key storage (default: `~/.claw-wrap/ca` on macOS, `/etc/openclaw/ca` on Linux)
-- `validity_days`: Certificate validity period (default: 365)
-- `organization`: CA organization name in certificate
+- `cert_file`: Certificate filename (default: `ca.crt`). Use `tls.crt` for cert-manager compatibility.
+- `key_file`: Key filename (default: `ca.key`). Use `tls.key` for cert-manager compatibility.
+- `external`: Enable external CA mode (default: `false`). When `true`:
+  - Fails fast if CA files are missing (never auto-generates)
+  - Relaxes key permission check for k8s secret mounts (allows 0644)
+  - Watches files for changes and hot-reloads on rotation
+- `validity_days`: Certificate validity period (default: 365, ignored in external mode)
+- `organization`: CA organization name in certificate (ignored in external mode)
 
-The CA cert is auto-generated on first start and auto-rotated 30 days before expiry.
+**Self-managed mode** (default): The CA cert is auto-generated on first start and auto-rotated 30 days before expiry.
+
+**External mode** (`external: true`): Use with cert-manager or k8s secrets:
+
+```yaml
+http_proxy:
+  ca:
+    path: /etc/claw/ca
+    cert_file: tls.crt
+    key_file: tls.key
+    external: true
+```
 
 ### `strip_response_headers`
 
