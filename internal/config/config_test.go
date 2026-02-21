@@ -662,6 +662,135 @@ func TestGetBWBinary(t *testing.T) {
 	}
 }
 
+func TestGetVaultBinary(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nil proxy returns empty", Config{}, ""},
+		{"empty vault_binary returns empty", Config{Proxy: &ProxyConfig{}}, ""},
+		{"configured absolute path returned", Config{Proxy: &ProxyConfig{VaultBinary: "/usr/bin/vault"}}, "/usr/bin/vault"},
+		{"relative path rejected", Config{Proxy: &ProxyConfig{VaultBinary: "vault"}}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetVaultBinary(); got != tt.want {
+				t.Errorf("GetVaultBinary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetVaultAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nil proxy", Config{}, ""},
+		{"empty", Config{Proxy: &ProxyConfig{}}, ""},
+		{"configured", Config{Proxy: &ProxyConfig{VaultAddr: "https://vault:8200"}}, "https://vault:8200"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetVaultAddr(); got != tt.want {
+				t.Errorf("GetVaultAddr() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetVaultSkipVerify(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+
+	t.Run("nil proxy", func(t *testing.T) {
+		cfg := Config{}
+		if got := cfg.GetVaultSkipVerify(); got != nil {
+			t.Errorf("GetVaultSkipVerify() = %v, want nil", *got)
+		}
+	})
+	t.Run("unset returns nil", func(t *testing.T) {
+		cfg := Config{Proxy: &ProxyConfig{}}
+		if got := cfg.GetVaultSkipVerify(); got != nil {
+			t.Errorf("GetVaultSkipVerify() = %v, want nil", *got)
+		}
+	})
+	t.Run("explicit true", func(t *testing.T) {
+		cfg := Config{Proxy: &ProxyConfig{VaultSkipVerify: boolPtr(true)}}
+		got := cfg.GetVaultSkipVerify()
+		if got == nil || !*got {
+			t.Errorf("GetVaultSkipVerify() = %v, want *true", got)
+		}
+	})
+	t.Run("explicit false", func(t *testing.T) {
+		cfg := Config{Proxy: &ProxyConfig{VaultSkipVerify: boolPtr(false)}}
+		got := cfg.GetVaultSkipVerify()
+		if got == nil || *got {
+			t.Errorf("GetVaultSkipVerify() = %v, want *false", got)
+		}
+	})
+}
+
+func TestGetVaultCACert(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nil proxy", Config{}, ""},
+		{"empty", Config{Proxy: &ProxyConfig{}}, ""},
+		{"absolute path", Config{Proxy: &ProxyConfig{VaultCACert: "/etc/vault/ca.pem"}}, "/etc/vault/ca.pem"},
+		{"relative path rejected", Config{Proxy: &ProxyConfig{VaultCACert: "ca.pem"}}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetVaultCACert(); got != tt.want {
+				t.Errorf("GetVaultCACert() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetVaultNamespace(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nil proxy", Config{}, ""},
+		{"empty", Config{Proxy: &ProxyConfig{}}, ""},
+		{"configured", Config{Proxy: &ProxyConfig{VaultNamespace: "team-a"}}, "team-a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetVaultNamespace(); got != tt.want {
+				t.Errorf("GetVaultNamespace() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetVaultTokenFile(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nil proxy", Config{}, ""},
+		{"empty returns empty", Config{Proxy: &ProxyConfig{}}, ""},
+		{"absolute path", Config{Proxy: &ProxyConfig{VaultTokenFile: "/home/bot/.vault-token"}}, "/home/bot/.vault-token"},
+		{"relative path rejected", Config{Proxy: &ProxyConfig{VaultTokenFile: ".vault-token"}}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetVaultTokenFile(); got != tt.want {
+				t.Errorf("GetVaultTokenFile() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_PassBinaryFromYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -257,7 +257,7 @@ Optional in-memory TTL cache for credential fetch results.
 
 - Default: `0` (disabled)
 - Format: Go duration (`30s`, `2m`, `1h`)
-- Scope: only `op://` (1Password) and `bw:` (Bitwarden) credential sources
+- Scope: `op://` (1Password), `bw:` (Bitwarden), and `vault:` (HashiCorp Vault) credential sources
 - `claw-wrap check` always bypasses this cache and fetches credentials live
 
 Use this to reduce repeated upstream secret-store latency for frequently-invoked tools.
@@ -684,6 +684,52 @@ If `bw_binary` is unset, claw-wrap only auto-detects `bw` in trusted directories
 - If a systemd credential file exists but fails security checks, claw-wrap fails closed (no env fallback)
 - Session token passed via environment variable, not command line
 - Session cleaned up on daemon shutdown
+
+### HashiCorp Vault (`vault:`)
+
+```yaml
+credentials:
+  api-key:
+    source: vault:secret/myapp/api-key
+
+  # With jq extraction from secret JSON
+  db-password:
+    source: vault:secret/myapp/database | .password
+```
+
+Fetches secrets from HashiCorp Vault using the `vault` CLI. Supports both KV-v2 (default) and KV-v1 engines.
+
+Use natural paths (e.g., `secret/myapp/key`) — the `vault kv get` command handles the KV-v2 `/data/` path prefix internally.
+
+Optional CLI and connection overrides:
+
+```yaml
+proxy:
+  vault_binary: /usr/bin/vault
+  vault_addr: https://127.0.0.1:8200
+  vault_skip_verify: false
+  vault_cacert: /etc/vault/ca.pem
+  vault_namespace: ""
+  vault_token_file: /home/bot/.vault-token
+```
+
+If `vault_binary` is unset, claw-wrap only auto-detects `vault` in trusted directories:
+`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/home/linuxbrew/.linuxbrew/bin`.
+
+Connection settings (`vault_addr`, `vault_skip_verify`, `vault_cacert`, `vault_namespace`) override the corresponding `VAULT_ADDR`, `VAULT_SKIP_VERIFY`, `VAULT_CACERT`, and `VAULT_NAMESPACE` environment variables when set.
+
+**Authentication model:**
+
+claw-wrap does **not** authenticate with Vault itself. The user (or operator) must run `vault login` externally, which stores a token at `~/.vault-token`. The `vault` CLI reads this token automatically. This supports time-scoped access: configure TTL on the Vault user so tokens expire after a set window (15 minutes, 1 hour, etc.).
+
+Use `vault_token_file` to point to a non-default token file location (requires Vault CLI 1.10+).
+
+**Security:**
+
+- Secrets never stored in plaintext config — fetched on-demand via CLI
+- Token managed externally; claw-wrap cannot refresh or extend access
+- Expired tokens produce a generic "vault read failed" error
+- Supports self-signed certs via `vault_cacert` or `vault_skip_verify`
 
 ### jq Extraction
 

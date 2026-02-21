@@ -280,6 +280,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 			credentials.WithPassBinary(e.cfg.GetPassBinary()),
 			credentials.WithOPBinary(e.cfg.GetOPBinary()),
 			credentials.WithBWBinary(e.cfg.GetBWBinary()),
+			credentials.WithVaultBinary(e.cfg.GetVaultBinary()),
 		)
 		if err != nil {
 			return "", err
@@ -437,6 +438,7 @@ func (e *ToolExecutor) setupConfigFile() error {
 			credentials.WithPassBinary(e.cfg.GetPassBinary()),
 			credentials.WithOPBinary(e.cfg.GetOPBinary()),
 			credentials.WithBWBinary(e.cfg.GetBWBinary()),
+			credentials.WithVaultBinary(e.cfg.GetVaultBinary()),
 		)
 		if err != nil {
 			return fmt.Errorf("fetch credential %s: %w", credName, err)

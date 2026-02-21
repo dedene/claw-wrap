@@ -75,6 +75,11 @@ var (
 	setAgeIdentityFileFunc    = credentials.SetAgeIdentityFile
 	setOPTokenFileFunc        = credentials.SetOPTokenFile
 	setCredentialCacheTTLFunc = credentials.SetCredentialCacheTTL
+	setVaultAddrFunc          = credentials.SetVaultAddr
+	setVaultSkipVerifyFunc    = credentials.SetVaultSkipVerify
+	setVaultCACertFunc        = credentials.SetVaultCACert
+	setVaultNamespaceFunc     = credentials.SetVaultNamespace
+	setVaultTokenFileFunc     = credentials.SetVaultTokenFile
 	fetchCredentialFunc       = credentials.Fetch
 	cleanupBWSessionFunc      = credentials.CleanupBWSession
 )
@@ -156,6 +161,11 @@ func (d *Daemon) Run() error {
 	setAgeIdentityFileFunc(cfg.GetAgeIdentityFile())
 	setOPTokenFileFunc(cfg.GetOPTokenFile())
 	setCredentialCacheTTLFunc(cfg.GetCredentialCacheTTL())
+	setVaultAddrFunc(cfg.GetVaultAddr())
+	setVaultSkipVerifyFunc(cfg.GetVaultSkipVerify())
+	setVaultCACertFunc(cfg.GetVaultCACert())
+	setVaultNamespaceFunc(cfg.GetVaultNamespace())
+	setVaultTokenFileFunc(cfg.GetVaultTokenFile())
 	defer cleanupBWSessionFunc()
 
 	auditLogger, err := audit.New(cfg.GetAuditConfig())
@@ -350,6 +360,11 @@ func (d *Daemon) reloadConfig() error {
 	setAgeIdentityFileFunc(newCfg.GetAgeIdentityFile())
 	setOPTokenFileFunc(newCfg.GetOPTokenFile())
 	setCredentialCacheTTLFunc(newCfg.GetCredentialCacheTTL())
+	setVaultAddrFunc(newCfg.GetVaultAddr())
+	setVaultSkipVerifyFunc(newCfg.GetVaultSkipVerify())
+	setVaultCACertFunc(newCfg.GetVaultCACert())
+	setVaultNamespaceFunc(newCfg.GetVaultNamespace())
+	setVaultTokenFileFunc(newCfg.GetVaultTokenFile())
 
 	return nil
 }
@@ -483,6 +498,7 @@ func (d *Daemon) startHTTPProxy(cfg *config.Config) error {
 		httpproxy.WithPassBinary(cfg.GetPassBinary()),
 		httpproxy.WithOPBinary(cfg.GetOPBinary()),
 		httpproxy.WithBWBinary(cfg.GetBWBinary()),
+		httpproxy.WithVaultBinary(cfg.GetVaultBinary()),
 		httpproxy.WithAuthToken(d.proxyAuthToken),
 		httpproxy.WithRequireAuth(requireAuth),
 	)
@@ -684,6 +700,7 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 				credentials.WithPassBinary(cfg.GetPassBinary()),
 				credentials.WithOPBinary(cfg.GetOPBinary()),
 				credentials.WithBWBinary(cfg.GetBWBinary()),
+				credentials.WithVaultBinary(cfg.GetVaultBinary()),
 				credentials.WithBypassCache(),
 			)
 			if err != nil || value == "" {

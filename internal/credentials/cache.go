@@ -191,7 +191,7 @@ func sweepInterval(ttl time.Duration) time.Duration {
 }
 
 func isCredentialCacheableBackend(backend Backend) bool {
-	return backend == Backend1Password || backend == BackendBitwarden
+	return backend == Backend1Password || backend == BackendBitwarden || backend == BackendVault
 }
 
 func credentialCacheKey(parsed *ParsedSource) string {

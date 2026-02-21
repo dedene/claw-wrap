@@ -59,6 +59,14 @@ func TestWithBWBinary(t *testing.T) {
 	}
 }
 
+func TestWithVaultBinary(t *testing.T) {
+	opts := &FetchOptions{}
+	WithVaultBinary("/custom/vault")(opts)
+	if opts.VaultBinary != "/custom/vault" {
+		t.Errorf("VaultBinary = %q, want %q", opts.VaultBinary, "/custom/vault")
+	}
+}
+
 func TestWithBypassCache(t *testing.T) {
 	opts := &FetchOptions{}
 	WithBypassCache()(opts)
