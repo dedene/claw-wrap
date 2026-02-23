@@ -87,7 +87,7 @@ claw-wrap supports two approaches for credential injection:
 - You want route-based credential injection by host/path
 - Multiple tools need the same API credentials
 
-## Secret Backends
+## Credential Backends
 
 | Backend | Prefix | Example | Notes |
 | ------- | ------ | ------- | ----- |
@@ -190,19 +190,6 @@ claw-wrap list      # Should show gh
 claw-wrap check     # Should show credentials OK (run from host/admin context)
 gh repo list        # Should work — using proxied credentials
 ```
-
-## Credential Backends
-
-| Backend | Format | Example |
-| --- | --- | --- |
-| [pass](https://www.passwordstore.org/) | `pass:path` | `pass:cli/github/token` |
-| [1Password CLI](https://developer.1password.com/docs/cli/) | `op://vault/item/field` | `op://dev/github/token` |
-| [Bitwarden CLI](https://bitwarden.com/help/cli/) | `bw:item-uuid` | `bw:a1b2c3d4` |
-| macOS Keychain | `keychain:service` | `keychain:github-token` |
-| [age](https://age-encryption.org/) | `age:/path/file.age` | `age:/etc/secrets/token.age` |
-| Environment | `env:VAR` | `env:GH_TOKEN` |
-
-All backends support `| .jq_expr` suffix for JSON field extraction (e.g. `op://vault/item/field | .token`).
 
 ## Safety Controls
 
