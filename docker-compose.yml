@@ -1,0 +1,74 @@
+services:
+  claw-wrap-daemon:
+    build:
+      context: .
+      dockerfile: docker/claw-wrap/Dockerfile
+      args:
+        PNPM_TRACK: ${PNPM_TRACK:-10}
+        YARN_TRACK: ${YARN_TRACK:-4}
+    image: ${CLAW_WRAP_SIDECAR_IMAGE:-claw-wrap-sidecar:local}
+    init: true
+    environment:
+      DAEMON_UID: ${DAEMON_UID:-1000}
+      OPENCLAW_UID: ${OPENCLAW_UID:-1000}
+      OPENCLAW_SHARED_GID: ${OPENCLAW_SHARED_GID:-2000}
+
+      CLAW_WRAP_CONFIG: /etc/openclaw/wrappers.yaml
+      CLAW_CONFIG_DIR: /workspace/config
+      TOOLS_DIR: /opt/claw-wrap/bin
+      BREW_PREFIX: /home/linuxbrew/.linuxbrew
+      NPM_PREFIX: /opt/claw-wrap/npm-global
+
+      APT_PACKAGES: ${APT_PACKAGES:-}
+      BREW_PACKAGES: ${BREW_PACKAGES:-}
+      NPM_GLOBAL_PACKAGES: ${NPM_GLOBAL_PACKAGES:-}
+
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+
+      AUTH_MODE: ${AUTH_MODE:-0640}
+      SOCKET_MODE: ${SOCKET_MODE:-0660}
+    volumes:
+      - openclaw_runtime:/run/openclaw
+      - claw_state:/opt/claw-wrap
+      - claw_state:/home/linuxbrew/.linuxbrew
+      - ${CLAW_WRAP_WRAPPERS_FILE:-./wrappers.yaml}:/etc/openclaw/wrappers.yaml:ro
+      - ${OPENCLAW_CONFIG_DIR:-./tmp/.openclaw}:/workspace/config
+    ports:
+      - 127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:${OPENCLAW_GATEWAY_PORT:-18789}
+    healthcheck:
+      test: ['CMD-SHELL', 'test -f /run/openclaw/auth && test -S /run/openclaw/secrets.sock']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openclaw:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.2.21}
+    command:
+      - sh
+      - -lc
+      - >-
+        mkdir -p /home/node/.openclaw/credentials &&
+        exec node /app/openclaw.mjs gateway --allow-unconfigured --bind
+        ${OPENCLAW_GATEWAY_BIND:-lan} --port ${OPENCLAW_GATEWAY_PORT:-18789}
+    depends_on:
+      claw-wrap-daemon:
+        condition: service_healthy
+    network_mode: 'service:claw-wrap-daemon'
+    environment:
+      PATH: /opt/claw-wrap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      HTTPS_PROXY: http://127.0.0.1:8080
+      HTTP_PROXY: http://127.0.0.1:8080
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+    volumes:
+      - openclaw_runtime:/run/openclaw
+      - claw_state:/opt/claw-wrap:ro
+      - ${OPENCLAW_CONFIG_DIR:-./tmp/.openclaw}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR:-./tmp/.openclaw/workspace}:/workspace
+    stdin_open: true
+    tty: true
+
+volumes:
+  openclaw_runtime:
+  claw_state:

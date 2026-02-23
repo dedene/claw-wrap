@@ -1,0 +1,39 @@
+proxy:
+  hmac_secret_file: /run/openclaw/auth
+
+tools:
+  curl:
+    binary: /usr/bin/curl
+    use_proxy: true
+
+  # Advanced example: restricted gh usage with token injection.
+  # gh:
+  #   binary: /home/linuxbrew/.linuxbrew/bin/gh
+  #   use_proxy: true
+  #   env:
+  #     GH_TOKEN: github-token
+  #   mode: allowlist
+  #   allowed_args:
+  #     - pattern: "^(pr|issue|repo)\\s+(view|list|status)"
+  #       match: command
+  #       message: "Only read-style gh commands are allowed"
+  #   blocked_args:
+  #     - pattern: "repo\\s+delete"
+  #       match: command
+  #       message: "Repository deletion is blocked"
+  #     - pattern: "--confirm"
+  #       match: arg
+  #       message: "Confirmation flags are blocked"
+  #   timeout: 180s
+
+# Optional credentials for advanced examples.
+# credentials:
+#   github-token:
+#     source: env:GITHUB_TOKEN
+
+http_proxy:
+  enabled: true
+  listen: 127.0.0.1:8080
+  require_auth: true
+  ca:
+    path: /run/openclaw/ca

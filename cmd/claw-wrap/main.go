@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 
 	"claw-wrap/internal/config"
 	"claw-wrap/internal/daemon"
@@ -99,9 +100,33 @@ func runDaemon() error {
 			opts = append(opts, daemon.WithConfigPath(os.Args[i+1]))
 			i++
 		case arg == "--uid" && i+1 < len(os.Args):
-			var uid uint32
-			fmt.Sscanf(os.Args[i+1], "%d", &uid)
+			uidValue, err := strconv.ParseUint(os.Args[i+1], 10, 32)
+			if err != nil {
+				return fmt.Errorf("invalid --uid value %q: %w", os.Args[i+1], err)
+			}
+			uid := uint32(uidValue)
 			opts = append(opts, daemon.WithAllowedUID(uid))
+			i++
+		case arg == "--runtime-gid" && i+1 < len(os.Args):
+			gid, err := strconv.Atoi(os.Args[i+1])
+			if err != nil || gid < 0 {
+				return fmt.Errorf("invalid --runtime-gid value %q (must be >= 0)", os.Args[i+1])
+			}
+			opts = append(opts, daemon.WithRuntimeGID(gid))
+			i++
+		case arg == "--auth-mode" && i+1 < len(os.Args):
+			mode, err := daemon.ParseAuthFileMode(os.Args[i+1])
+			if err != nil {
+				return fmt.Errorf("invalid --auth-mode: %w", err)
+			}
+			opts = append(opts, daemon.WithAuthFileMode(mode))
+			i++
+		case arg == "--socket-mode" && i+1 < len(os.Args):
+			mode, err := daemon.ParseSocketFileMode(os.Args[i+1])
+			if err != nil {
+				return fmt.Errorf("invalid --socket-mode: %w", err)
+			}
+			opts = append(opts, daemon.WithSocketFileMode(mode))
 			i++
 		case arg == "-h" || arg == "--help":
 			fmt.Printf(`claw-wrap daemon - Start the secrets daemon
@@ -113,6 +138,9 @@ Options:
   --socket PATH   Socket path (default: %s)
   --config PATH   Config path (default: %s)
   --uid UID       Allowed UID (default: %d)
+  --runtime-gid GID Shared runtime group for socket/auth (optional)
+  --auth-mode MODE  Auth file mode: 0600 or 0640 (default: 0600)
+  --socket-mode MODE Socket mode: 0600 or 0660 (default: 0600)
   -h, --help      Show this help
 `, paths.SocketPath(), paths.ConfigPath(), os.Getuid())
 			return nil

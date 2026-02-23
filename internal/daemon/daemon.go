@@ -34,6 +34,13 @@ import (
 // DefaultSocketPath is the default Unix socket path.
 var DefaultSocketPath = paths.SocketPath()
 
+const (
+	defaultAuthFileMode   = os.FileMode(0o600)
+	defaultSocketFileMode = os.FileMode(0o600)
+	defaultRuntimeDirMode = os.FileMode(0o700)
+	sharedRuntimeDirMode  = os.FileMode(0o750)
+)
+
 // Ucred holds Unix peer credentials.
 type Ucred struct {
 	PID int32
@@ -46,6 +53,9 @@ type Daemon struct {
 	socketPath      string
 	configPath      string
 	allowedUID      uint32
+	runtimeGID      int
+	authFileMode    os.FileMode
+	socketFileMode  os.FileMode
 	allowedBinaries []string
 	version         string
 	listener        net.Listener
@@ -102,6 +112,21 @@ func WithAllowedUID(uid uint32) Option {
 	return func(d *Daemon) { d.allowedUID = uid }
 }
 
+// WithRuntimeGID sets an optional shared GID for runtime artifacts.
+func WithRuntimeGID(gid int) Option {
+	return func(d *Daemon) { d.runtimeGID = gid }
+}
+
+// WithAuthFileMode sets the mode used for the HMAC auth file.
+func WithAuthFileMode(mode os.FileMode) Option {
+	return func(d *Daemon) { d.authFileMode = mode }
+}
+
+// WithSocketFileMode sets the mode used for the Unix socket.
+func WithSocketFileMode(mode os.FileMode) Option {
+	return func(d *Daemon) { d.socketFileMode = mode }
+}
+
 // WithAllowedBinaries sets the allowed binary paths.
 func WithAllowedBinaries(binaries []string) Option {
 	return func(d *Daemon) { d.allowedBinaries = binaries }
@@ -141,6 +166,9 @@ func New(opts ...Option) *Daemon {
 		socketPath:         DefaultSocketPath,
 		configPath:         config.DefaultConfigPath,
 		allowedUID:         uint32(os.Getuid()),
+		runtimeGID:         -1,
+		authFileMode:       defaultAuthFileMode,
+		socketFileMode:     defaultSocketFileMode,
 		allowedBinaries:    allowed,
 		metrics:            newSecurityMetrics(),
 		proxyAuthTokenPath: paths.ProxyAuthTokenPath(),
@@ -153,6 +181,16 @@ func New(opts ...Option) *Daemon {
 
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run() error {
+	if d.runtimeGID < -1 {
+		return fmt.Errorf("runtime gid must be >= 0 when set")
+	}
+	if !IsAllowedAuthFileMode(d.authFileMode) {
+		return fmt.Errorf("invalid auth file mode %04o", d.authFileMode)
+	}
+	if !IsAllowedSocketFileMode(d.socketFileMode) {
+		return fmt.Errorf("invalid socket file mode %04o", d.socketFileMode)
+	}
+
 	cfg, err := config.Load(d.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -182,16 +220,19 @@ func (d *Daemon) Run() error {
 	d.secret = secret
 
 	secretPath := cfg.GetHMACSecretFile()
-	if err := auth.WriteSecret(secretPath, secret); err != nil {
+	if err := auth.WriteSecretWithMode(secretPath, secret, d.authFileMode); err != nil {
 		return fmt.Errorf("write HMAC secret: %w", err)
+	}
+	if err := d.applyRuntimePathOwnership(secretPath); err != nil {
+		return fmt.Errorf("chgrp auth file: %w", err)
 	}
 	log.Printf("[INFO] HMAC secret written to %s", secretPath)
 
 	runtimeDir := paths.RuntimeDir()
-	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+	if err := os.MkdirAll(runtimeDir, d.runtimeDirMode()); err != nil {
 		return fmt.Errorf("create runtime dir: %w", err)
 	}
-	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+	if err := d.applyRuntimeDirPermissions(runtimeDir); err != nil {
 		return fmt.Errorf("chmod runtime dir: %w", err)
 	}
 
@@ -207,8 +248,11 @@ func (d *Daemon) Run() error {
 	}
 	d.listener = listener
 
-	if err := os.Chmod(d.socketPath, 0o600); err != nil {
+	if err := os.Chmod(d.socketPath, d.socketFileMode); err != nil {
 		return fmt.Errorf("chmod socket: %w", err)
+	}
+	if err := d.applyRuntimePathOwnership(d.socketPath); err != nil {
+		return fmt.Errorf("chgrp socket: %w", err)
 	}
 
 	d.cfgMu.Lock()
@@ -280,6 +324,51 @@ func (d *Daemon) Run() error {
 			d.handleConnection(c, d.getConfig())
 		}(conn)
 	}
+}
+
+func (d *Daemon) runtimeDirMode() os.FileMode {
+	if d.runtimeGID >= 0 {
+		return sharedRuntimeDirMode
+	}
+	return defaultRuntimeDirMode
+}
+
+func (d *Daemon) applyRuntimeDirPermissions(path string) error {
+	if err := d.applyRuntimePathOwnership(path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() == d.runtimeDirMode() {
+		return nil
+	}
+	if err := os.Chmod(path, d.runtimeDirMode()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *Daemon) applyRuntimePathOwnership(path string) error {
+	if d.runtimeGID < 0 {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		if int(stat.Gid) == d.runtimeGID {
+			return nil
+		}
+	}
+
+	if err := os.Chown(path, -1, d.runtimeGID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *Daemon) acquireConnSlot() bool {

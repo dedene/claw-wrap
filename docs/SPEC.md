@@ -22,7 +22,7 @@ All requests must include an HMAC-SHA256 signature with a unique nonce.
 
 **Secret provisioning**:
 - Daemon generates random 32-byte secret on startup
-- Written to `/run/openclaw/auth` with mode 0600
+- Written to `/run/openclaw/auth` with mode `0600` by default (`--auth-mode` can set `0640`)
 - Bind-mounted read-only into sandbox by firejail
 
 **Signature scope** (v3):
@@ -239,9 +239,17 @@ Credential values are single-quoted in YAML templates to prevent special charact
 
 ### 5.3 File Permissions
 
+Defaults:
+
 ```
 /run/openclaw/auth:         0600 <user>:<user>
 /run/openclaw/secrets.sock: 0600 <user>:<user>
+```
+
+Shared sidecar setups can use:
+
+```
+--runtime-gid <gid> --auth-mode 0640 --socket-mode 0660
 ```
 
 Firejail profile must bind-mount `/run/openclaw/auth` as read-only.

@@ -9,6 +9,7 @@
   </p>
   <p>A secure credential proxy for CLI tools and HTTP APIs. Executes tools with secrets on behalf of sandboxed processes, or injects credentials into HTTP requests via MITM proxy — credentials never enter the sandbox.</p>
   <p>
+    <a href="docs/quickstart.md">Quickstart</a> ·
     <a href="docs/INSTALL.md">Install</a> ·
     <a href="docs/CONFIG.md">Config</a> ·
     <a href="docs/SANDBOX.md">Sandbox</a> ·
@@ -339,6 +340,8 @@ self-restart mechanism, and verification steps.
 - [Configuration Reference](docs/CONFIG.md) — all options for credentials, tools, blocked/allowed
   args, output redaction, config file injection
 - [HTTP Proxy Setup](docs/CONFIG.md#http-proxy-settings) — MITM proxy for API credential injection
+- [Quickstart (Compose)](docs/quickstart.md) — clone/edit/up flow with sidecar preflight + real `node /app/openclaw.mjs onboard`
+- [Docker Compose Sidecar](docs/DOCKER_COMPOSE.md) — architecture, security defaults, and release model
 - [Sandbox Setup](docs/SANDBOX.md) — firejail (Linux) and nono (macOS) with verification steps
 - [Protocol Specification](docs/SPEC.md) — HMAC authentication, message framing, proxy protocol
 

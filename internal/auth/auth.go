@@ -55,6 +55,13 @@ func GenerateSecret() ([]byte, error) {
 // It uses an atomic write via a temporary file to prevent partial writes.
 // It refuses to write if the target path is a symlink (prevents symlink attacks).
 func WriteSecret(path string, secret []byte) error {
+	return WriteSecretWithMode(path, secret, 0o600)
+}
+
+// WriteSecretWithMode writes the secret to the specified path with the provided mode.
+// It uses an atomic write via a temporary file to prevent partial writes.
+// It refuses to write if the target path is a symlink (prevents symlink attacks).
+func WriteSecretWithMode(path string, secret []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
@@ -82,7 +89,7 @@ func WriteSecret(path string, secret []byte) error {
 	}()
 
 	// Set permissions before writing content
-	if err := tmpFile.Chmod(0600); err != nil {
+	if err := tmpFile.Chmod(mode); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
