@@ -90,7 +90,7 @@ func (d *Decoder) Decode(v interface{}) error {
 	}
 
 	if length > MaxMessageSize {
-		return ErrMessageTooLarge
+		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes)", length, MaxMessageSize)
 	}
 
 	// Read payload
