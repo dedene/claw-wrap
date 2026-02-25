@@ -28,6 +28,10 @@ const (
 	DefaultReadMessageTimeout = 15 * time.Second
 	// DefaultMaxStdinMessageSize is the default max size for wrapper->daemon NDJSON messages.
 	DefaultMaxStdinMessageSize = 1 << 20 // 1MB
+	// DefaultMaxMessageSize is the default max size for single messages in length-prefixed communication.
+	DefaultMaxMessageSize = 16 * 1024 * 1024 // 16MB
+	// DefaultInitialReadBuffer is the default initial buffer size for reading request headers.
+	DefaultInitialReadBuffer = 1 * 1024 * 1024 // 1MB
 	// DefaultReplayCacheTTL is the default TTL for replay entries.
 	DefaultReplayCacheTTL = 2 * time.Minute
 	// DefaultReplayCacheMaxEntries is the default replay cache size cap.
@@ -59,6 +63,8 @@ type ProxyConfig struct {
 	ReplayCacheTTL        string `yaml:"replay_cache_ttl"`        // e.g., "2m"
 	ReplayCacheMax        int    `yaml:"replay_cache_max_entries"`
 	CredentialCacheTTL    string `yaml:"credential_cache_ttl"` // e.g., "30s" (0/empty disables)
+	MaxMessageSize        string `yaml:"max_message_size"`     // e.g., "16MB" (max single message size for length-prefixed communication)
+	InitialReadBuffer     string `yaml:"initial_read_buffer"`  // e.g., "1MB" (initial buffer size for reading request headers)
 	VaultBinary           string `yaml:"vault_binary"`         // e.g., "/usr/bin/vault"
 	VaultAddr             string `yaml:"vault_addr"`           // e.g., "https://127.0.0.1:8200"
 	VaultSkipVerify       *bool  `yaml:"vault_skip_verify"`    // skip TLS verification (nil = inherit env)
@@ -968,6 +974,36 @@ func (c *Config) GetMaxStdinMessageSize() int {
 	}
 	if size > int64(^uint(0)>>1) {
 		return DefaultMaxStdinMessageSize
+	}
+	return int(size)
+}
+
+// GetMaxMessageSize returns the maximum message size for length-prefixed communication.
+func (c *Config) GetMaxMessageSize() int {
+	if c.Proxy == nil || c.Proxy.MaxMessageSize == "" {
+		return DefaultMaxMessageSize
+	}
+	size, err := ParseByteSize(c.Proxy.MaxMessageSize)
+	if err != nil || size <= 0 {
+		return DefaultMaxMessageSize
+	}
+	if size > int64(^uint(0)>>1) {
+		return DefaultMaxMessageSize
+	}
+	return int(size)
+}
+
+// GetInitialReadBuffer returns the initial buffer size for reading request headers.
+func (c *Config) GetInitialReadBuffer() int {
+	if c.Proxy == nil || c.Proxy.InitialReadBuffer == "" {
+		return DefaultInitialReadBuffer
+	}
+	size, err := ParseByteSize(c.Proxy.InitialReadBuffer)
+	if err != nil || size <= 0 {
+		return DefaultInitialReadBuffer
+	}
+	if size > int64(^uint(0)>>1) {
+		return DefaultInitialReadBuffer
 	}
 	return int(size)
 }

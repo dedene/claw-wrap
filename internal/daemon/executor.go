@@ -180,7 +180,7 @@ func NewToolExecutor(conn net.Conn, req *protocol.ProxyRequest, tool *config.Too
 		readMsgTO:      cfg.GetReadMessageTimeout(),
 		writeTO:        cfg.GetWriteTimeout(),
 		msgSize:        cfg.GetMaxStdinMessageSize(),
-		encoder:        framing.NewEncoder(conn),
+		encoder:        framing.NewEncoderWithMaxMessageSize(conn, cfg.GetMaxMessageSize()),
 		proxyAuthToken: proxyAuthToken,
 		auditLogger:    auditLogger,
 		callerPID:      callerPID,

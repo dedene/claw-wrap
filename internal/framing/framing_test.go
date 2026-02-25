@@ -140,16 +140,19 @@ func TestDecoder_TruncatedPayload(t *testing.T) {
 func TestDecoder_OversizedMessage(t *testing.T) {
 	var buf bytes.Buffer
 
-	// Write length exceeding MaxMessageSize
+	// Write length exceeding DefaultMaxMessageSize
 	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, MaxMessageSize+1)
+	binary.BigEndian.PutUint32(lenBuf, uint32(DefaultMaxMessageSize+1))
 	buf.Write(lenBuf)
 
 	dec := NewDecoder(&buf)
 	var msg testMessage
 	err := dec.Decode(&msg)
-	if err != ErrMessageTooLarge {
-		t.Errorf("Decode() error = %v, want ErrMessageTooLarge", err)
+	if err == nil {
+		t.Errorf("Decode() expected error")
+	}
+	if !strings.Contains(err.Error(), "message exceeds maximum size") {
+		t.Errorf("Decode() error message doesn't contain expected text: %v", err)
 	}
 }
 
@@ -157,16 +160,19 @@ func TestEncoder_OversizedMessage(t *testing.T) {
 	var buf bytes.Buffer
 	enc := NewEncoder(&buf)
 
-	// Create a message larger than MaxMessageSize
+	// Create a message larger than DefaultMaxMessageSize
 	msg := testMessage{
 		Type:    "oversized",
-		Payload: strings.Repeat("x", MaxMessageSize),
+		Payload: strings.Repeat("x", DefaultMaxMessageSize),
 		Count:   1,
 	}
 
 	err := enc.Encode(msg)
-	if err != ErrMessageTooLarge {
-		t.Errorf("Encode() error = %v, want ErrMessageTooLarge", err)
+	if err == nil {
+		t.Errorf("Encode() expected error")
+	}
+	if !strings.Contains(err.Error(), "message exceeds maximum size") {
+		t.Errorf("Encode() error message doesn't contain expected text: %v", err)
 	}
 }
 
@@ -322,16 +328,19 @@ func TestNDJSONWriter_OversizedMessage(t *testing.T) {
 	var buf bytes.Buffer
 	writer := NewNDJSONWriter(&buf)
 
-	// Create a message larger than MaxMessageSize
+	// Create a message larger than DefaultMaxMessageSize
 	msg := testMessage{
 		Type:    "oversized",
-		Payload: strings.Repeat("x", MaxMessageSize),
+		Payload: strings.Repeat("x", DefaultMaxMessageSize),
 		Count:   1,
 	}
 
 	err := writer.Write(msg)
-	if err != ErrMessageTooLarge {
-		t.Errorf("Write() error = %v, want ErrMessageTooLarge", err)
+	if err == nil {
+		t.Errorf("Write() expected error")
+	}
+	if !strings.Contains(err.Error(), "message exceeds maximum size") {
+		t.Errorf("Write() error message doesn't contain expected text: %v", err)
 	}
 }
 

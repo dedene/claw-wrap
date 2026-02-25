@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"claw-wrap/internal/auth"
+	"claw-wrap/internal/config"
 	"claw-wrap/internal/framing"
 	"claw-wrap/internal/paths"
 	"claw-wrap/internal/protocol"
@@ -55,7 +56,16 @@ func New(opts ...Option) *Wrapper {
 
 // RunTool requests execution from the daemon and relays I/O.
 func (w *Wrapper) RunTool(toolName string, args []string) error {
-	// 1. Load HMAC secret
+	// 1. Load config to get message size limits
+	cfg, err := config.Load(config.DefaultConfigPath)
+	if err != nil {
+		// If config loading fails, use defaults
+		cfg = &config.Config{
+			Proxy: &config.ProxyConfig{},
+		}
+	}
+
+	// 2. Load HMAC secret
 	secret, err := auth.LoadSecret(w.authPath)
 	if err != nil {
 		return fmt.Errorf("load secret: %w", err)
@@ -110,20 +120,20 @@ func (w *Wrapper) RunTool(toolName string, args []string) error {
 		UsePTY:     usePTY,
 		WindowSize: winSize,
 	}
-	ndjson := framing.NewNDJSONWriter(conn)
+	ndjson := framing.NewNDJSONWriterWithMaxMessageSize(conn, cfg.GetMaxMessageSize())
 	if err := ndjson.Write(req); err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
 
 	// 7. Enter I/O loop (PTY mode uses raw terminal)
 	if usePTY {
-		return w.ioLoopPTY(conn, ndjson, stdinFd)
+		return w.ioLoopPTY(conn, ndjson, stdinFd, cfg)
 	}
-	return w.ioLoop(conn, ndjson)
+	return w.ioLoop(conn, ndjson, cfg)
 }
 
-func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter) error {
-	decoder := framing.NewDecoder(conn)
+func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter, cfg *config.Config) error {
+	decoder := framing.NewDecoderWithMaxMessageSize(conn, cfg.GetMaxMessageSize())
 
 	// Channels for coordination
 	stdinCh := make(chan []byte, 16)
@@ -231,18 +241,18 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter) error {
 }
 
 // ioLoopPTY handles I/O in PTY mode with raw terminal and SIGWINCH forwarding.
-func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd int) error {
+func (w *Wrapper) ioLoopPTY(conn net.Conn, ndjson *framing.NDJSONWriter, stdinFd int, cfg *config.Config) error {
 	// Put terminal in raw mode
 	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
 		// Fall back to regular mode if raw mode fails
-		return w.ioLoop(conn, ndjson)
+		return w.ioLoop(conn, ndjson, cfg)
 	}
 	// Restore terminal on all exit paths. Note: os.Exit() doesn't run defers,
 	// so we call Restore explicitly before os.Exit and use defer for error returns.
 	defer term.Restore(stdinFd, oldState)
 
-	decoder := framing.NewDecoder(conn)
+	decoder := framing.NewDecoderWithMaxMessageSize(conn, cfg.GetMaxMessageSize())
 
 	// Channels for coordination
 	stdinCh := make(chan []byte, 16)

@@ -15,10 +15,9 @@ import (
 	"io"
 )
 
-// MaxMessageSize is the maximum allowed message size (16 MB).
-// Output is already chunked, so individual frames don't need to be huge.
-// 16 MB is generous for any single response frame.
-const MaxMessageSize = 16 * 1024 * 1024
+// DefaultMaxMessageSize is the default maximum allowed message size (16 MB).
+// This is used if no configuration is provided.
+const DefaultMaxMessageSize = 16 * 1024 * 1024
 
 // ErrMessageTooLarge is returned when a message exceeds MaxMessageSize.
 var ErrMessageTooLarge = errors.New("message exceeds maximum size")
@@ -28,12 +27,24 @@ var ErrEmptyMessage = errors.New("empty message")
 
 // Encoder writes length-prefixed JSON messages (for daemon responses).
 type Encoder struct {
-	w io.Writer
+	w              io.Writer
+	maxMessageSize int
 }
 
-// NewEncoder creates a new Encoder that writes to w.
+// NewEncoder creates a new Encoder that writes to w with default message size.
 func NewEncoder(w io.Writer) *Encoder {
-	return &Encoder{w: w}
+	return NewEncoderWithMaxMessageSize(w, DefaultMaxMessageSize)
+}
+
+// NewEncoderWithMaxMessageSize creates a new Encoder with custom maximum message size.
+func NewEncoderWithMaxMessageSize(w io.Writer, maxMessageSize int) *Encoder {
+	if maxMessageSize <= 0 {
+		maxMessageSize = DefaultMaxMessageSize
+	}
+	return &Encoder{
+		w:              w,
+		maxMessageSize: maxMessageSize,
+	}
 }
 
 // Encode marshals v to JSON and writes it with a 4-byte big-endian length prefix.
@@ -43,8 +54,8 @@ func (e *Encoder) Encode(v interface{}) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	if len(data) > MaxMessageSize {
-		return ErrMessageTooLarge
+	if len(data) > e.maxMessageSize {
+		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes)", len(data), e.maxMessageSize)
 	}
 
 	// Write 4-byte big-endian length prefix
@@ -64,19 +75,32 @@ func (e *Encoder) Encode(v interface{}) error {
 
 // Decoder reads length-prefixed JSON messages (for wrapper reading responses).
 type Decoder struct {
-	r io.Reader
+	r              io.Reader
+	maxMessageSize int
 }
 
-// NewDecoder creates a new Decoder that reads from r.
+// NewDecoder creates a new Decoder that reads from r with default message size.
 func NewDecoder(r io.Reader) *Decoder {
-	return &Decoder{r: r}
+	return NewDecoderWithMaxMessageSize(r, DefaultMaxMessageSize)
+}
+
+// NewDecoderWithMaxMessageSize creates a new Decoder with custom maximum message size.
+func NewDecoderWithMaxMessageSize(r io.Reader, maxMessageSize int) *Decoder {
+	if maxMessageSize <= 0 {
+		maxMessageSize = DefaultMaxMessageSize
+	}
+	return &Decoder{
+		r:              r,
+		maxMessageSize: maxMessageSize,
+	}
 }
 
 // Decode reads a length-prefixed message and unmarshals it into v.
 func (d *Decoder) Decode(v interface{}) error {
 	// Read 4-byte length prefix
 	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(d.r, lenBuf); err != nil {
+	_, err := io.ReadFull(d.r, lenBuf)
+	if err != nil {
 		if err == io.EOF {
 			return io.EOF
 		}
@@ -89,8 +113,8 @@ func (d *Decoder) Decode(v interface{}) error {
 		return ErrEmptyMessage
 	}
 
-	if length > MaxMessageSize {
-		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes)", length, MaxMessageSize)
+	if int(length) > d.maxMessageSize {
+		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes)", length, d.maxMessageSize)
 	}
 
 	// Read payload
@@ -111,12 +135,24 @@ func (d *Decoder) Decode(v interface{}) error {
 
 // NDJSONWriter writes newline-delimited JSON (for wrapper requests).
 type NDJSONWriter struct {
-	w io.Writer
+	w              io.Writer
+	maxMessageSize int
 }
 
-// NewNDJSONWriter creates a new NDJSONWriter that writes to w.
+// NewNDJSONWriter creates a new NDJSONWriter that writes to w with default message size.
 func NewNDJSONWriter(w io.Writer) *NDJSONWriter {
-	return &NDJSONWriter{w: w}
+	return NewNDJSONWriterWithMaxMessageSize(w, DefaultMaxMessageSize)
+}
+
+// NewNDJSONWriterWithMaxMessageSize creates a new NDJSONWriter with custom maximum message size.
+func NewNDJSONWriterWithMaxMessageSize(w io.Writer, maxMessageSize int) *NDJSONWriter {
+	if maxMessageSize <= 0 {
+		maxMessageSize = DefaultMaxMessageSize
+	}
+	return &NDJSONWriter{
+		w:              w,
+		maxMessageSize: maxMessageSize,
+	}
 }
 
 // Write marshals v to JSON and writes it followed by a newline.
@@ -126,8 +162,8 @@ func (n *NDJSONWriter) Write(v interface{}) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	if len(data) > MaxMessageSize {
-		return ErrMessageTooLarge
+	if len(data) > n.maxMessageSize {
+		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes)", len(data), n.maxMessageSize)
 	}
 
 	// Write JSON followed by newline
@@ -147,15 +183,15 @@ type NDJSONReader struct {
 	scanner *bufio.Scanner
 }
 
-// NewNDJSONReader creates a new NDJSONReader that reads from r.
+// NewNDJSONReader creates a new NDJSONReader that reads from r with default message size.
 func NewNDJSONReader(r io.Reader) *NDJSONReader {
-	return NewNDJSONReaderWithLimit(r, MaxMessageSize)
+	return NewNDJSONReaderWithLimit(r, DefaultMaxMessageSize)
 }
 
 // NewNDJSONReaderWithLimit creates a new NDJSONReader with a custom max token size.
 func NewNDJSONReaderWithLimit(r io.Reader, maxTokenSize int) *NDJSONReader {
-	if maxTokenSize <= 0 || maxTokenSize > MaxMessageSize {
-		maxTokenSize = MaxMessageSize
+	if maxTokenSize <= 0 {
+		maxTokenSize = DefaultMaxMessageSize
 	}
 
 	scanner := bufio.NewScanner(r)

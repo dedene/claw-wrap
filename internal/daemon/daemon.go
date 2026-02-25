@@ -544,7 +544,7 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		log.Printf("[WARN] set header deadline: %v", err)
 	}
 
-	buf := make([]byte, 1*1024*1024) // Increase from 64KB to 1MB
+	buf := make([]byte, cfg.GetInitialReadBuffer())
 	n, err := conn.Read(buf)
 	if err != nil {
 		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
