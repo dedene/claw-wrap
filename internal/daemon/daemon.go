@@ -560,14 +560,25 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 	_ = conn.SetReadDeadline(time.Time{})
 
 	if n == len(buf) {
-		d.metrics.Inc("oversized_msg")
-		log.Printf("[WARN] deny reason=oversized_msg stage=header")
-		d.sendError(conn, "request too large")
+		// To determine if this is a proxy request, we need to try to parse the initial bytes as JSON
+		var rawRequest map[string]interface{}
+		if err := json.Unmarshal(buf, &rawRequest); err == nil && rawRequest["hmac"] != nil {
+			// It's a proxy request - use length-prefixed error
+			d.metrics.Inc("oversized_msg")
+			log.Printf("[WARN] deny reason=oversized_msg stage=header")
+			d.sendProxyError(conn, "request too large")
+		} else {
+			// Not a proxy request - use raw JSON error
+			d.metrics.Inc("oversized_msg")
+			log.Printf("[WARN] deny reason=oversized_msg stage=header")
+			d.sendError(conn, "request too large")
+		}
 		return
 	}
 
 	payload := bytes.TrimSpace(buf[:n])
 	if len(payload) == 0 {
+		// Empty request - assume it's not a proxy request
 		d.sendError(conn, "empty request")
 		return
 	}
