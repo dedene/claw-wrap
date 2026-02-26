@@ -251,9 +251,21 @@ Maximum size of wrapper-to-daemon NDJSON messages (`stdin`, `signal`, `cleanup`)
 
 Maximum message size for length-prefixed communication between client and daemon. This includes both request and response messages. Oversized messages will be rejected with an error.
 
+**Important:** Setting this value too high can potentially cause buffer overflow issues and increase the risk of denial of service attacks. Only increase this value if you are certain your use case requires it.
+
+**When to change:**
+- If you're working with commands that produce very large responses, like `gh repo list --limit 200` with detailed fields
+- If you see errors like "message exceeds maximum size"
+
 ### `initial_read_buffer`
 
 Initial buffer size for reading request headers from the socket. If the request is larger than this buffer, the connection will be terminated. This setting helps protect against buffer overflow attacks.
+
+**Important:** Setting this value too high can potentially cause buffer overflow issues and increase the risk of denial of service attacks. Only increase this value if you are certain your use case requires it.
+
+**When to change:**
+- If you're working with commands that have very large headers or a large number of arguments
+- If you see errors like "request too large" or "message exceeds maximum size" when sending requests
 
 ### `replay_cache_ttl` / `replay_cache_max_entries`
 
