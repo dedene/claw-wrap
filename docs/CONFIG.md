@@ -205,7 +205,9 @@ proxy:
   max_connections: 64                       # Concurrent connection limit
   read_header_timeout: 3s                   # Timeout for first request read
   read_message_timeout: 15s                 # Timeout for stdin/control reads
-  max_stdin_message_size: 1MB               # Max stdin/control message size
+  max_stdin_message_size: 1MB              # Max stdin/control message size
+  max_message_size: 100MB                   # Max message size for length-prefixed communication
+  initial_read_buffer: 2MB                  # Initial buffer size for reading request headers
   replay_cache_ttl: 2m                      # Replay detection TTL
   replay_cache_max_entries: 10000           # Replay cache size cap
   credential_cache_ttl: 0s                  # Credential fetch cache TTL (0 disables)
@@ -244,6 +246,14 @@ Timeout applied to each stdin/control message while a proxied command is running
 ### `max_stdin_message_size`
 
 Maximum size of wrapper-to-daemon NDJSON messages (`stdin`, `signal`, `cleanup`). Oversized messages are rejected.
+
+### `max_message_size`
+
+Maximum message size for length-prefixed communication between client and daemon. This includes both request and response messages. Oversized messages will be rejected with an error.
+
+### `initial_read_buffer`
+
+Initial buffer size for reading request headers from the socket. If the request is larger than this buffer, the connection will be terminated. This setting helps protect against buffer overflow attacks.
 
 ### `replay_cache_ttl` / `replay_cache_max_entries`
 
