@@ -8,6 +8,7 @@ package framing
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -109,12 +110,42 @@ func (d *Decoder) Decode(v interface{}) error {
 
 	length := binary.BigEndian.Uint32(lenBuf)
 
+	// Check if this looks like a raw JSON message instead of length-prefixed
+	// Raw JSON messages start with {" or ["
+	if lenBuf[0] == '{' && lenBuf[1] == '"' || lenBuf[0] == '[' {
+		// This looks like raw JSON - treat entire stream as JSON
+		// First, rewind to start of message
+		if rs, ok := d.r.(io.ReadSeeker); ok {
+			rs.Seek(-4, io.SeekCurrent)
+		}
+
+		// Read raw JSON until we get valid JSON
+		var buf bytes.Buffer
+		buf.Write(lenBuf) // include the bytes we already read
+
+		// Read more bytes
+		readBuf := make([]byte, 1024)
+		for {
+			n, err := d.r.Read(readBuf)
+			if err != nil {
+				return fmt.Errorf("read raw JSON: %w", err)
+			}
+
+			buf.Write(readBuf[:n])
+
+			// Try to unmarshal
+			if err := json.Unmarshal(buf.Bytes(), v); err == nil {
+				return nil
+			}
+		}
+	}
+
 	if length == 0 {
 		return ErrEmptyMessage
 	}
 
 	if int(length) > d.maxMessageSize {
-		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes)", length, d.maxMessageSize)
+		return fmt.Errorf("message exceeds maximum size (got %d bytes, max is %d bytes, raw: %x)", length, d.maxMessageSize, lenBuf)
 	}
 
 	// Read payload
