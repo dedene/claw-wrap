@@ -2,7 +2,6 @@
 package daemon
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -544,9 +543,10 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		log.Printf("[WARN] set header deadline: %v", err)
 	}
 
-	buf := make([]byte, cfg.GetInitialReadBuffer())
-	n, err := conn.Read(buf)
-	if err != nil {
+	// Use NDJSON reader to read just the first message (not all pending data)
+	reader := framing.NewNDJSONReaderWithLimit(conn, cfg.GetMaxMessageSize())
+	var rawRequest map[string]interface{}
+	if err := reader.Read(&rawRequest); err != nil {
 		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
 			d.metrics.Inc("read_timeout")
 			log.Printf("[WARN] deny reason=read_timeout stage=header")
@@ -559,10 +559,10 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 
 	_ = conn.SetReadDeadline(time.Time{})
 
-	if n == len(buf) {
-		// To determine if this is a proxy request, we need to try to parse the initial bytes as JSON
-		var rawRequest map[string]interface{}
-		if err := json.Unmarshal(buf, &rawRequest); err == nil && rawRequest["hmac"] != nil {
+	// Check if message is oversized by marshaling it
+	testBuf, _ := json.Marshal(rawRequest)
+	if len(testBuf) >= cfg.GetInitialReadBuffer() {
+		if rawRequest["hmac"] != nil {
 			// It's a proxy request - use length-prefixed error
 			d.metrics.Inc("oversized_msg")
 			log.Printf("[WARN] deny reason=oversized_msg stage=header")
@@ -576,20 +576,13 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		return
 	}
 
-	payload := bytes.TrimSpace(buf[:n])
-	if len(payload) == 0 {
+	if len(rawRequest) == 0 {
 		// Empty request - assume it's not a proxy request
 		d.sendError(conn, "empty request")
 		return
 	}
 
-	// Parse JSON early to determine request type so we can use the
-	// correct error framing (raw JSON for admin, length-prefixed for proxy).
-	var rawRequest map[string]interface{}
-	if err := json.Unmarshal(payload, &rawRequest); err != nil {
-		d.sendError(conn, "invalid json")
-		return
-	}
+	// Request type already determined from rawRequest
 	isProxy := rawRequest["hmac"] != nil
 	errSend := d.sendError
 	if isProxy {
@@ -644,6 +637,8 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		log.Printf("[DEBUG] peer pid=%d uid=%d exe=unverified", ucred.PID, ucred.UID)
 	}
 
+	// Re-marshal the request for handlers that expect []byte
+	payload, _ := json.Marshal(rawRequest)
 	switch {
 	case rawRequest["admin"] != nil:
 		d.handleAdminRequest(conn, payload, cfg, ucred.UID, ucred.PID)

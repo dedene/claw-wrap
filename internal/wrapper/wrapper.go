@@ -142,26 +142,46 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter, cfg *confi
 	doneCh := make(chan struct{})
 	var exitCode int
 
-	// Start stdin reader goroutine
-	go func() {
-		buf := make([]byte, 32*1024) // 32KB chunks
-		for {
-			n, err := os.Stdin.Read(buf)
-			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
-				select {
-				case stdinCh <- chunk:
-				case <-doneCh:
+	// Check if stdin is a terminal
+	stdinFd := int(os.Stdin.Fd())
+	isTerminal := term.IsTerminal(stdinFd)
+
+	// stdinClosed tracks if we've already sent EOF (for non-terminal stdin)
+	stdinClosed := false
+
+	if isTerminal {
+		// Start stdin reader goroutine for interactive mode
+		go func() {
+			buf := make([]byte, 32*1024) // 32KB chunks
+			for {
+				n, err := os.Stdin.Read(buf)
+				if n > 0 {
+					chunk := make([]byte, n)
+					copy(chunk, buf[:n])
+					select {
+					case stdinCh <- chunk:
+					case <-doneCh:
+						return
+					}
+				}
+				if err != nil {
+					close(stdinEOF)
 					return
 				}
 			}
-			if err != nil {
-				close(stdinEOF)
-				return
-			}
+		}()
+	} else {
+		// Non-terminal stdin: immediately send EOF
+		// This prevents tools like 'gh' from hanging waiting for input
+		msg := &protocol.WrapperMessage{
+			Type: protocol.MsgTypeStdin,
+			EOF:  true,
 		}
-	}()
+		if err := ndjson.Write(msg); err != nil {
+			return fmt.Errorf("send stdin EOF: %w", err)
+		}
+		stdinClosed = true
+	}
 
 	// Register signal handlers
 	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -216,6 +236,11 @@ func (w *Wrapper) ioLoop(conn net.Conn, ndjson *framing.NDJSONWriter, cfg *confi
 			}
 
 		case <-stdinEOF:
+			if stdinClosed {
+				// Already sent EOF for non-terminal stdin, ignore
+				stdinEOF = nil
+				continue
+			}
 			msg := &protocol.WrapperMessage{
 				Type: protocol.MsgTypeStdin,
 				EOF:  true,
