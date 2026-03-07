@@ -199,10 +199,25 @@ Common symptoms:
 |---------|-------|-----|
 | V8/Node.js crash (`ENOMEM` in `SetPermissions`) | `MemoryDenyWriteExecute=true` | Set to `false` |
 | "token invalid" / network errors | `RestrictAddressFamilies=AF_UNIX` | Add `AF_INET AF_INET6` |
+| Node/libuv fails enumerating interfaces after a runtime update | `RestrictAddressFamilies` missing `AF_NETLINK` | Add `AF_NETLINK` |
 | Tool hangs or gets killed | `SystemCallFilter` too strict | Check `journalctl` for SECCOMP audit messages |
 | "Read-only file system" on git fetch/push | `ProtectHome=read-only` blocks workspace writes | Add `ReadWritePaths=/path/to/workspace` |
 
 After changes: `sudo systemctl daemon-reload && sudo systemctl restart claw-wrap`
+
+If you installed an older copy of the unit before this fix landed, update the service
+or add an override:
+
+```bash
+sudo systemctl edit claw-wrap.service
+```
+
+Add:
+
+```ini
+[Service]
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+```
 
 ### Workspace write failures (git, file operations)
 

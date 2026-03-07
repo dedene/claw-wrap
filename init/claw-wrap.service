@@ -47,9 +47,10 @@ SystemCallFilter=@system-service
 # TOOL-DEPENDENT — adjust based on your configured tools:
 #
 # Network access: tools that call external APIs (gh, gog, strawpoll)
-# need AF_INET/AF_INET6. Only use AF_UNIX alone if ALL tools are
-# local/offline.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# need AF_INET/AF_INET6. Node/libuv may also need AF_NETLINK to
+# enumerate network interfaces. Only use AF_UNIX alone if ALL tools
+# are local/offline.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 #
 # JIT memory: Node.js (bird), Python, and other runtimes with JIT
 # compilers need writable+executable memory. Set to true only if
