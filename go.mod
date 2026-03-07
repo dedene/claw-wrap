@@ -1,6 +1,6 @@
 module claw-wrap
 
-go 1.24.4
+go 1.26.1
 
 require (
 	filippo.io/age v1.3.1

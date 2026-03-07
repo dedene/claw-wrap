@@ -3,7 +3,7 @@
   <h1>claw-wrap</h1>
   <p>
     <a href="https://github.com/dedene/claw-wrap/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dedene/claw-wrap/actions/workflows/ci.yml/badge.svg" /></a>
-    <a href="https://go.dev/"><img alt="Go 1.24+" src="https://img.shields.io/badge/go-1.24+-00ADD8.svg" /></a>
+    <a href="https://go.dev/"><img alt="Go 1.26+" src="https://img.shields.io/badge/go-1.26+-00ADD8.svg" /></a>
     <a href="https://goreportcard.com/report/github.com/dedene/claw-wrap"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/dedene/claw-wrap" /></a>
     <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg" /></a>
   </p>
@@ -362,7 +362,7 @@ make clean    # Remove build artifacts
 
 ## Requirements
 
-- Go 1.24+ (building from source)
+- Go 1.26+ (building from source)
 - Linux with systemd or macOS with launchd
 - A supported credential backend (see [table above](#credential-backends))
 - Optional: [firejail](https://firejail.wordpress.com/) (Linux) or [nono](https://github.com/lukehinds/nono) (macOS) for sandbox isolation

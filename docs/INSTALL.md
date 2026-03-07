@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Linux with systemd
-- Go 1.21+ (for building from source)
+- Go 1.26+ (for building from source)
 - GPG key pair
 - [`pass`](https://www.passwordstore.org/) (password-store)
 
