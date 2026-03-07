@@ -18,3 +18,7 @@ Thumbs.db
 /tmp/
 *.tmp
 *.log
+
+# Local runtime/config artifacts
+/.openclaw/
+/wrappers.yaml
