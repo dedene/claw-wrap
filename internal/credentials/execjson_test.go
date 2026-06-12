@@ -160,6 +160,10 @@ exit 1
 }
 
 func TestFetchFromExecJSON_Timeout(t *testing.T) {
+	origTimeout := execJSONCommandTimeout
+	execJSONCommandTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { execJSONCommandTimeout = origTimeout })
+
 	tmpDir := t.TempDir()
 	scriptPath := writeTrustedExecJSONHelper(t, tmpDir, "mint", `#!/bin/sh
 sleep 20

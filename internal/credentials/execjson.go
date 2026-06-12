@@ -15,7 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const execJSONCommandTimeout = 10 * time.Second
+var execJSONCommandTimeout = 10 * time.Second
 
 const maxExecJSONStderrLen = 1024
 

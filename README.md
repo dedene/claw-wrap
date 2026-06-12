@@ -98,8 +98,29 @@ claw-wrap supports two approaches for credential injection:
 | [macOS Keychain](https://support.apple.com/guide/keychain-access/) | `keychain:` | `keychain:service-name` | macOS only |
 | [age](https://age-encryption.org/) | `age:` | `age:/path/to/file.age` | File-level encryption |
 | [HashiCorp Vault](https://www.vaultproject.io/) | `vault:` | `vault:secret/myapp/key` | KV-v1 & KV-v2, external auth |
+| exec-json helper | `exec-json:` | `exec-json:/usr/local/lib/openclaw/mint-aws` | Helper prints `{"value":"…","expires_at":"…"}` on stdout; jq not supported |
 
 All backends except `env:` support jq extraction: `vault:secret/app/creds | .password`
+
+### GitHub App (`type: github-app`)
+
+Mint GitHub App installation tokens in the daemon instead of storing a PAT:
+
+```yaml
+credentials:
+  github-bot:
+    type: github-app
+    app_id: 12345
+    installation_id: 67890
+    private_key: pass:github/bot-app.pem
+    permissions:
+      contents: read
+      issues: write
+    repositories:
+      - my-org/my-repo
+```
+
+Tokens are minted lazily on first use, cached until `expires_at − 5m`, and refreshed with singleflight deduplication. On GitHub outage, a still-valid cached token is served (stale-if-valid). The App private key is fetched from `private_key` at mint time and never leaves the daemon.
 
 ## Quick Start
 

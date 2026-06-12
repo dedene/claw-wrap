@@ -731,6 +731,108 @@ Use `vault_token_file` to point to a non-default token file location (requires V
 - Expired tokens produce a generic "vault read failed" error
 - Supports self-signed certs via `vault_cacert` or `vault_skip_verify`
 
+### GitHub App (`type: github-app`)
+
+Mint GitHub App installation tokens in the daemon. Use `type: github-app` instead of `source:` — the two are mutually exclusive.
+
+```yaml
+credentials:
+  github-bot:
+    type: github-app
+    app_id: 12345
+    installation_id: 67890
+    private_key: pass:github/bot-app.pem
+    api_url: https://api.github.com
+    permissions:
+      contents: read
+      issues: write
+    repositories:
+      - my-org/my-repo
+```
+
+#### Credential fields
+
+| Field | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `source` | string | source-mode only | — | Mutually exclusive with `type` |
+| `type` | string | optional | — | Empty = source-mode. `github-app` = installation token minting |
+| `app_id` | int64 | `type: github-app` | — | GitHub App ID (must be non-zero) |
+| `installation_id` | int64 | `type: github-app` | — | Installation ID (must be non-zero) |
+| `private_key` | string | `type: github-app` | — | Credential source for PEM key material (e.g. `pass:github/bot.pem`); resolved at mint time only |
+| `api_url` | string | optional | `https://api.github.com` | GitHub API base URL (GHES override) |
+| `permissions` | map[string]string | optional | — | Scoped permissions sent in exchange body when non-empty |
+| `repositories` | []string | optional | — | Repository names sent in exchange body when non-empty |
+
+#### Validation
+
+| Condition | Result |
+| --- | --- |
+| `source` non-empty AND `type` non-empty | Error: mutually exclusive |
+| `source` empty AND `type` empty | Error: empty source |
+| `type` empty, `source` non-empty | Valid (existing source-mode behavior) |
+| `type: github-app`, `source` empty, `app_id` + `installation_id` + `private_key` set | Valid |
+| `type: github-app`, missing `app_id`, `installation_id`, or `private_key` | Error |
+| `type` unknown (not `github-app`) | Error |
+
+Tokens are minted lazily, cached until `expires_at − 5m`, singleflight-deduplicated on concurrent refresh, and stale-if-valid on mint failure while the token is still within its hard expiry. The App private key is fetched with cache bypass at mint time and is not retained after mint completes.
+
+### exec-json helper (`exec-json:`)
+
+Run a trusted helper binary that prints a JSON credential on stdout:
+
+```yaml
+credentials:
+  aws-role-token:
+    source: exec-json:/usr/local/lib/openclaw/mint-aws
+```
+
+#### Source syntax
+
+| Rule | Detail |
+| --- | --- |
+| Prefix | `exec-json:` |
+| Path | Absolute filesystem path to the helper executable. No arguments. |
+| jq | **Not supported.** A ` \| .jq_expr` suffix is rejected at parse time. |
+| Config | Plain `source:` string only. No `type:` field. |
+
+Helpers that need arguments or environment must wrap themselves in a script at a fixed absolute path.
+
+#### Helper stdout JSON contract
+
+The helper must print exactly one JSON object on stdout:
+
+| Field | Required | Type | Notes |
+| --- | --- | --- | --- |
+| `value` | yes | string | Non-empty credential string |
+| `expires_at` | no | string | RFC3339 timestamp |
+
+Unknown fields are ignored. When `expires_at` is absent or empty, the credential uses global TTL behavior (`credential_cache_ttl`). When present, per-entry expiry and stale-if-valid apply (refresh at `expires_at − 5m`).
+
+#### Helper binary trust rules
+
+Validated before every execution:
+
+| Check | Rule |
+| --- | --- |
+| Path | Must be absolute |
+| Symlinks | Rejected (`O_NOFOLLOW`) |
+| Type | Regular file |
+| Executable | Owner execute bit set |
+| Writable bits | Must not be group- or world-writable |
+| Owner | UID must equal daemon EUID or root (UID 0) |
+
+#### Execution and errors
+
+| Parameter | Value |
+| --- | --- |
+| Timeout | 10 seconds |
+| Stdin | Not connected |
+| Stdout | Parsed as JSON; never included in error messages |
+| Stderr | Included in errors on failure, truncated to 1 KiB |
+| Environment | Inherited from daemon process |
+
+Non-zero exit, timeout, malformed JSON, or missing/empty `value` return an error without leaking stdout content.
+
 ### jq Extraction
 
 All backends support jq extraction using the pipe syntax:
