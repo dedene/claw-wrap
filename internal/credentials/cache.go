@@ -61,7 +61,9 @@ func (c *credentialCache) SetTTL(ttl time.Duration) {
 	switch {
 	case ttl <= 0:
 		c.ttl = 0
-		c.entries = make(map[string]credentialCacheEntry)
+		// Entries with an inherent expiry are cached independent of the
+		// configured TTL; only static entries are dropped on disable.
+		c.dropStaticEntriesLocked()
 		stopCh, doneCh = c.detachSweeperLocked()
 	case ttl != c.ttl:
 		c.ttl = ttl
@@ -90,7 +92,10 @@ func (c *credentialCache) Get(key string, now time.Time) (Credential, bool) {
 	entry, ok := c.entries[key]
 	c.mu.RUnlock()
 
-	if ttl <= 0 || !ok {
+	if !ok {
+		return Credential{}, false
+	}
+	if ttl <= 0 && entry.hardExpiresAt.IsZero() {
 		return Credential{}, false
 	}
 	if !now.Before(entry.refreshAt) {
@@ -112,9 +117,6 @@ func (c *credentialCache) Get(key string, now time.Time) (Credential, bool) {
 func (c *credentialCache) staleEntry(key string, now time.Time) (credentialCacheEntry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.ttl <= 0 {
-		return credentialCacheEntry{}, false
-	}
 	entry, ok := c.entries[key]
 	if !ok || entry.hardExpiresAt.IsZero() || !now.Before(entry.hardExpiresAt) {
 		return credentialCacheEntry{}, false
@@ -133,7 +135,7 @@ func (c *credentialCache) SetCredential(key string, cred Credential, now time.Ti
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.ttl <= 0 {
+	if c.ttl <= 0 && cred.ExpiresAt.IsZero() {
 		return
 	}
 	c.sweepExpiredLocked(now)
@@ -145,15 +147,26 @@ func (c *credentialCache) SetCredential(key string, cred Credential, now time.Ti
 }
 
 func computeRefreshAt(now time.Time, ttl time.Duration, expiresAt time.Time) time.Time {
-	refreshAt := now.Add(ttl)
 	if expiresAt.IsZero() {
-		return refreshAt
+		return now.Add(ttl)
 	}
 	early := expiresAt.Add(-credentialEarlyRefreshMargin)
+	if ttl <= 0 {
+		return early
+	}
+	refreshAt := now.Add(ttl)
 	if early.Before(refreshAt) {
 		return early
 	}
 	return refreshAt
+}
+
+func (c *credentialCache) dropStaticEntriesLocked() {
+	for key, entry := range c.entries {
+		if entry.hardExpiresAt.IsZero() {
+			delete(c.entries, key)
+		}
+	}
 }
 
 func (c *credentialCache) sweepExpiredLocked(now time.Time) {
@@ -257,7 +270,7 @@ func (c *credentialCache) fetchCached(
 
 	stale, hasStale := c.staleEntry(cacheKey, now)
 
-	v, err, _ := c.fetchGroup.Do(cacheKey, func() (interface{}, error) {
+	v, err, _ := c.fetchGroup.Do(cacheKey, func() (any, error) {
 		innerNow := credentialCacheNow()
 		if cred, ok := c.Get(cacheKey, innerNow); ok {
 			return cred, nil
@@ -270,7 +283,7 @@ func (c *credentialCache) fetchCached(
 		return cred, nil
 	})
 	if err != nil {
-		if hasStale {
+		if hasStale && credentialCacheNow().Before(stale.hardExpiresAt) {
 			log.Printf("[WARN] credential refresh failed for %s, serving stale value: %v", displaySource, err)
 			return Credential{Value: stale.value, ExpiresAt: stale.hardExpiresAt}, nil
 		}

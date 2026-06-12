@@ -44,7 +44,7 @@ func TestValidate_CredentialGitHubApp(t *testing.T) {
 				InstallationID: 2,
 				PrivateKey:     "pass:github/app.pem",
 			},
-			wantErr: "requires app_id",
+			wantErr: "requires a positive app_id",
 		},
 		{
 			name: "github-app missing installation_id",
@@ -53,7 +53,7 @@ func TestValidate_CredentialGitHubApp(t *testing.T) {
 				AppID:      1,
 				PrivateKey: "pass:github/app.pem",
 			},
-			wantErr: "requires installation_id",
+			wantErr: "requires a positive installation_id",
 		},
 		{
 			name: "github-app missing private_key",

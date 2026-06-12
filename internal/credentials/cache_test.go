@@ -70,8 +70,10 @@ func setupCredentialCacheTest(t *testing.T) func() {
 	origTTL := currentCredentialCacheTTL()
 	credentialCacheNow = time.Now
 	SetCredentialCacheTTL(0)
+	clearCredentialCacheEntries()
 	return func() {
 		SetCredentialCacheTTL(0)
+		clearCredentialCacheEntries()
 		credentialCacheNow = origNow
 		credentialTickerFactory = origTickerFactory
 		SetCredentialCacheTTL(origTTL)

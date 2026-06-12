@@ -260,6 +260,8 @@ Optional in-memory TTL cache for credential fetch results.
 - Scope: `op://` (1Password), `bw:` (Bitwarden), and `vault:` (HashiCorp Vault) credential sources
 - `claw-wrap check` always bypasses this cache and fetches credentials live
 
+Credentials with an inherent expiry — `github-app` installation tokens and `exec-json` results carrying `expires_at` — are cached until `expires_at − 5m` regardless of this setting. The TTL, when set, can only shorten their refresh interval, never extend it past expiry.
+
 Use this to reduce repeated upstream secret-store latency for frequently-invoked tools.
 
 ### `write_timeout`

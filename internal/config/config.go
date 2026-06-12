@@ -203,11 +203,11 @@ func (c CredentialDef) validate(name string) error {
 
 	switch typ {
 	case "github-app":
-		if c.AppID == 0 {
-			return fmt.Errorf("credential %q: github-app requires app_id", name)
+		if c.AppID <= 0 {
+			return fmt.Errorf("credential %q: github-app requires a positive app_id", name)
 		}
-		if c.InstallationID == 0 {
-			return fmt.Errorf("credential %q: github-app requires installation_id", name)
+		if c.InstallationID <= 0 {
+			return fmt.Errorf("credential %q: github-app requires a positive installation_id", name)
 		}
 		if strings.TrimSpace(c.PrivateKey) == "" {
 			return fmt.Errorf("credential %q: github-app requires private_key", name)
