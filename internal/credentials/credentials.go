@@ -180,6 +180,9 @@ func fetchCredentialFromBackend(parsed *ParsedSource, options *FetchOptions) (Cr
 			return Credential{}, err
 		}
 
+	case BackendExecJSON:
+		return fetchFromExecJSON(parsed)
+
 	default:
 		return Credential{}, fmt.Errorf("unknown credential backend")
 	}

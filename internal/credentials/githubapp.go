@@ -25,12 +25,12 @@ import (
 )
 
 const (
-	githubAppCredentialType   = "github-app"
-	defaultGitHubAPIURL       = "https://api.github.com"
-	githubAppExchangeTimeout  = 10 * time.Second
-	githubAppJWTIssuedOffset  = 60 * time.Second
-	githubAppJWTLifetime      = 540 * time.Second
-	githubAPIVersionHeader    = "2022-11-28"
+	githubAppCredentialType  = "github-app"
+	defaultGitHubAPIURL      = "https://api.github.com"
+	githubAppExchangeTimeout = 10 * time.Second
+	githubAppJWTIssuedOffset = 60 * time.Second
+	githubAppJWTLifetime     = 540 * time.Second
+	githubAPIVersionHeader   = "2022-11-28"
 )
 
 var githubAppHTTPClient = &http.Client{Timeout: githubAppExchangeTimeout}

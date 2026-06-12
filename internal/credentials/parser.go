@@ -17,6 +17,7 @@ const (
 	BackendKeychain  Backend = "keychain"
 	BackendBitwarden Backend = "bw"
 	BackendVault     Backend = "vault"
+	BackendExecJSON  Backend = "exec-json"
 )
 
 // ParsedSource represents a parsed credential source URI.
@@ -85,6 +86,9 @@ func ParseSource(source string) (*ParsedSource, error) {
 	case strings.HasPrefix(source, "vault:"):
 		backend = BackendVault
 		path = strings.TrimPrefix(source, "vault:")
+	case strings.HasPrefix(source, "exec-json:"):
+		backend = BackendExecJSON
+		path = strings.TrimPrefix(source, "exec-json:")
 	default:
 		// Legacy format: assume pass
 		backend = BackendPass
@@ -93,6 +97,10 @@ func ParseSource(source string) (*ParsedSource, error) {
 
 	if path == "" {
 		return nil, fmt.Errorf("empty path in credential source %q", original)
+	}
+
+	if backend == BackendExecJSON && jqExpr != "" {
+		return nil, fmt.Errorf("exec-json backend does not support jq extraction in %q", original)
 	}
 
 	return &ParsedSource{

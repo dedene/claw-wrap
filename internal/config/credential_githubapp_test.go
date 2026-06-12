@@ -65,8 +65,8 @@ func TestValidate_CredentialGitHubApp(t *testing.T) {
 			wantErr: "requires private_key",
 		},
 		{
-			name: "unknown type",
-			cred: CredentialDef{Type: "magic"},
+			name:    "unknown type",
+			cred:    CredentialDef{Type: "magic"},
 			wantErr: "unknown credential type",
 		},
 	}
