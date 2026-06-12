@@ -20,6 +20,13 @@ var DefaultEnvFile = paths.EnvFile()
 var currentEUIDFunc = os.Geteuid
 var findTrustedBinaryFunc = paths.FindTrustedBinary
 
+// Credential is a fetched secret with an optional absolute expiry.
+// Zero ExpiresAt means the value has no inherent expiry (static backends).
+type Credential struct {
+	Value     string
+	ExpiresAt time.Time
+}
+
 // FetchOptions holds configuration for credential fetching.
 type FetchOptions struct {
 	PassBinary  string
@@ -80,6 +87,15 @@ func WithBypassCache() FetchOption {
 //
 // All sources optionally support jq extraction: "source | .jq_expr"
 func Fetch(source string, opts ...FetchOption) (string, error) {
+	cred, err := FetchCredential(source, opts...)
+	if err != nil {
+		return "", err
+	}
+	return cred.Value, nil
+}
+
+// FetchCredential retrieves a credential and its expiry metadata from the specified source.
+func FetchCredential(source string, opts ...FetchOption) (Credential, error) {
 	options := &FetchOptions{
 		PassBinary: paths.DefaultPassBinary(),
 	}
@@ -87,88 +103,88 @@ func Fetch(source string, opts ...FetchOption) (string, error) {
 		opt(options)
 	}
 
-	// Parse the source to determine backend and extract jq
 	parsed, err := ParseSource(source)
 	if err != nil {
-		return "", fmt.Errorf("invalid credential source")
+		return Credential{}, fmt.Errorf("invalid credential source")
 	}
 
-	ctx := context.Background()
 	cacheEligible := isCredentialCacheableBackend(parsed.Backend) && !options.BypassCache
-	cacheKey := ""
 	now := credentialCacheNow()
 	if cacheEligible {
-		cacheKey = credentialCacheKey(parsed)
-		if cached, ok := credentialResultCache.Get(cacheKey, now); ok {
-			return cached, nil
-		}
+		cacheKey := credentialCacheKey(parsed)
+		return credentialResultCache.fetchCached(cacheKey, now, func() (Credential, error) {
+			return fetchCredentialFromBackend(parsed, options)
+		})
 	}
 
+	return fetchCredentialFromBackend(parsed, options)
+}
+
+func fetchCredentialFromBackend(parsed *ParsedSource, options *FetchOptions) (Credential, error) {
+	ctx := context.Background()
+
 	var result string
+	var err error
 	switch parsed.Backend {
 	case BackendEnv:
 		result, err = fetchFromEnvFile(parsed.Path)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 		if parsed.HasJQ() {
 			result, err = ApplyJQ(ctx, []byte(result), parsed.JQExpr)
 			if err != nil {
-				return "", err
+				return Credential{}, err
 			}
 		}
 
 	case BackendPass:
 		result, err = fetchFromPass(options.PassBinary, parsed.Path)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 		if parsed.HasJQ() {
 			result, err = ApplyJQ(ctx, []byte(result), parsed.JQExpr)
 			if err != nil {
-				return "", err
+				return Credential{}, err
 			}
 		}
 
 	case Backend1Password:
 		result, err = fetchFrom1Password(ctx, parsed, options.OPBinary)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 
 	case BackendAge:
 		result, err = fetchFromAge(ctx, parsed)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 
 	case BackendKeychain:
 		result, err = fetchFromKeychain(ctx, parsed)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 
 	case BackendBitwarden:
 		result, err = fetchFromBitwarden(ctx, parsed, options.BWBinary)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 
 	case BackendVault:
 		result, err = fetchFromVault(ctx, parsed, options.VaultBinary)
 		if err != nil {
-			return "", err
+			return Credential{}, err
 		}
 
 	default:
-		return "", fmt.Errorf("unknown credential backend")
+		return Credential{}, fmt.Errorf("unknown credential backend")
 	}
 
-	if cacheEligible && result != "" {
-		insertNow := credentialCacheNow()
-		credentialResultCache.Set(cacheKey, result, insertNow)
-	}
-	return result, nil
+	return Credential{Value: result}, nil
 }
 
 // fetchFromEnvFile reads a credential from the env file.

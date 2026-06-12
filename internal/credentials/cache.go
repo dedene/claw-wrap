@@ -1,18 +1,23 @@
 package credentials
 
 import (
+	"log"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
 	minCredentialCacheSweepInterval = 5 * time.Second
 	maxCredentialCacheSweepInterval = time.Minute
+	credentialEarlyRefreshMargin    = 5 * time.Minute
 )
 
 type credentialCacheEntry struct {
-	value     string
-	expiresAt time.Time
+	value         string
+	refreshAt     time.Time
+	hardExpiresAt time.Time
 }
 
 type credentialCache struct {
@@ -22,6 +27,7 @@ type credentialCache struct {
 	sweeperStop     chan struct{}
 	sweeperDone     chan struct{}
 	sweeperInterval time.Duration
+	fetchGroup      singleflight.Group
 }
 
 var (
@@ -78,29 +84,50 @@ func (c *credentialCache) SetTTL(ttl time.Duration) {
 	}
 }
 
-func (c *credentialCache) Get(key string, now time.Time) (string, bool) {
+func (c *credentialCache) Get(key string, now time.Time) (Credential, bool) {
 	c.mu.RLock()
 	ttl := c.ttl
 	entry, ok := c.entries[key]
 	c.mu.RUnlock()
 
 	if ttl <= 0 || !ok {
-		return "", false
+		return Credential{}, false
 	}
-	if !now.Before(entry.expiresAt) {
-		c.mu.Lock()
-		if current, exists := c.entries[key]; exists && !now.Before(current.expiresAt) {
-			delete(c.entries, key)
+	if !now.Before(entry.refreshAt) {
+		if entry.hardExpiresAt.IsZero() || !now.Before(entry.hardExpiresAt) {
+			c.mu.Lock()
+			if current, exists := c.entries[key]; exists && !now.Before(current.refreshAt) {
+				if current.hardExpiresAt.IsZero() || !now.Before(current.hardExpiresAt) {
+					delete(c.entries, key)
+				}
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
-		return "", false
+		return Credential{}, false
 	}
 
-	return entry.value, true
+	return Credential{Value: entry.value, ExpiresAt: entry.hardExpiresAt}, true
+}
+
+func (c *credentialCache) staleEntry(key string, now time.Time) (credentialCacheEntry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.ttl <= 0 {
+		return credentialCacheEntry{}, false
+	}
+	entry, ok := c.entries[key]
+	if !ok || entry.hardExpiresAt.IsZero() || !now.Before(entry.hardExpiresAt) {
+		return credentialCacheEntry{}, false
+	}
+	return entry, true
 }
 
 func (c *credentialCache) Set(key, value string, now time.Time) {
-	if key == "" || value == "" {
+	c.SetCredential(key, Credential{Value: value}, now)
+}
+
+func (c *credentialCache) SetCredential(key string, cred Credential, now time.Time) {
+	if key == "" || cred.Value == "" {
 		return
 	}
 
@@ -111,17 +138,37 @@ func (c *credentialCache) Set(key, value string, now time.Time) {
 	}
 	c.sweepExpiredLocked(now)
 	c.entries[key] = credentialCacheEntry{
-		value:     value,
-		expiresAt: now.Add(c.ttl),
+		value:         cred.Value,
+		refreshAt:     computeRefreshAt(now, c.ttl, cred.ExpiresAt),
+		hardExpiresAt: cred.ExpiresAt,
 	}
+}
+
+func computeRefreshAt(now time.Time, ttl time.Duration, expiresAt time.Time) time.Time {
+	refreshAt := now.Add(ttl)
+	if expiresAt.IsZero() {
+		return refreshAt
+	}
+	early := expiresAt.Add(-credentialEarlyRefreshMargin)
+	if early.Before(refreshAt) {
+		return early
+	}
+	return refreshAt
 }
 
 func (c *credentialCache) sweepExpiredLocked(now time.Time) {
 	for key, entry := range c.entries {
-		if !now.Before(entry.expiresAt) {
+		if entryExpired(entry, now) {
 			delete(c.entries, key)
 		}
 	}
+}
+
+func entryExpired(entry credentialCacheEntry, now time.Time) bool {
+	if !entry.hardExpiresAt.IsZero() {
+		return !now.Before(entry.hardExpiresAt)
+	}
+	return !now.Before(entry.refreshAt)
 }
 
 func (c *credentialCache) detachSweeperLocked() (chan struct{}, chan struct{}) {
@@ -196,4 +243,37 @@ func isCredentialCacheableBackend(backend Backend) bool {
 
 func credentialCacheKey(parsed *ParsedSource) string {
 	return string(parsed.Backend) + "\x00" + parsed.Path + "\x00" + parsed.JQExpr
+}
+
+func (c *credentialCache) fetchCached(
+	cacheKey string,
+	now time.Time,
+	fetch func() (Credential, error),
+) (Credential, error) {
+	if cred, ok := c.Get(cacheKey, now); ok {
+		return cred, nil
+	}
+
+	stale, hasStale := c.staleEntry(cacheKey, now)
+
+	v, err, _ := c.fetchGroup.Do(cacheKey, func() (interface{}, error) {
+		innerNow := credentialCacheNow()
+		if cred, ok := c.Get(cacheKey, innerNow); ok {
+			return cred, nil
+		}
+		cred, err := fetch()
+		if err != nil {
+			return nil, err
+		}
+		c.SetCredential(cacheKey, cred, credentialCacheNow())
+		return cred, nil
+	})
+	if err != nil {
+		if hasStale {
+			log.Printf("[WARN] credential refresh failed for %s, serving stale value: %v", cacheKey, err)
+			return Credential{Value: stale.value, ExpiresAt: stale.hardExpiresAt}, nil
+		}
+		return Credential{}, err
+	}
+	return v.(Credential), nil
 }
