@@ -15,27 +15,6 @@ type ResolveInput struct {
 	Repositories   []string
 }
 
-// NewResolveInput constructs a ResolveInput from config YAML fields.
-func NewResolveInput(
-	label, source, credType string,
-	appID, installationID int64,
-	privateKey, apiURL string,
-	permissions map[string]string,
-	repositories []string,
-) ResolveInput {
-	return ResolveInput{
-		Label:          label,
-		Source:         source,
-		Type:           credType,
-		AppID:          appID,
-		InstallationID: installationID,
-		PrivateKey:     privateKey,
-		APIURL:         apiURL,
-		Permissions:    permissions,
-		Repositories:   repositories,
-	}
-}
-
 // DisplaySource returns a human-readable identifier for logging.
 func (in ResolveInput) DisplaySource() string {
 	if label := strings.TrimSpace(in.Label); label != "" {
@@ -48,18 +27,6 @@ func (in ResolveInput) DisplaySource() string {
 		return githubAppDisplaySource(in.AppID, in.InstallationID)
 	}
 	return ""
-}
-
-// ResolveNamed resolves a credential from config YAML fields at call sites.
-func ResolveNamed(
-	label, source, credType string,
-	appID, installationID int64,
-	privateKey, apiURL string,
-	permissions map[string]string,
-	repositories []string,
-	opts ...FetchOption,
-) (string, error) {
-	return Resolve(NewResolveInput(label, source, credType, appID, installationID, privateKey, apiURL, permissions, repositories), opts...)
 }
 
 // Resolve fetches a credential value from either a static source or a dynamic provider.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"claw-wrap/internal/credentials"
 	"claw-wrap/internal/paths"
 	"gopkg.in/yaml.v3"
 )
@@ -215,6 +216,22 @@ func (c CredentialDef) validate(name string) error {
 		return nil
 	default:
 		return fmt.Errorf("credential %q: unknown credential type %q", name, typ)
+	}
+}
+
+// ResolveInput maps the credential definition to the neutral resolution spec
+// consumed by the credentials package.
+func (c CredentialDef) ResolveInput(name string) credentials.ResolveInput {
+	return credentials.ResolveInput{
+		Label:          name,
+		Source:         c.Source,
+		Type:           c.Type,
+		AppID:          c.AppID,
+		InstallationID: c.InstallationID,
+		PrivateKey:     c.PrivateKey,
+		APIURL:         c.APIURL,
+		Permissions:    c.Permissions,
+		Repositories:   c.Repositories,
 	}
 }
 

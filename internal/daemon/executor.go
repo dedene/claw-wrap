@@ -275,16 +275,8 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		if !ok {
 			return "", fmt.Errorf("undefined credential: %s", name)
 		}
-		value, err := credentials.ResolveNamed(
-			name,
-			credDef.Source,
-			credDef.Type,
-			credDef.AppID,
-			credDef.InstallationID,
-			credDef.PrivateKey,
-			credDef.APIURL,
-			credDef.Permissions,
-			credDef.Repositories,
+		value, err := credentials.Resolve(
+			credDef.ResolveInput(name),
 			credentials.WithPassBinary(e.cfg.GetPassBinary()),
 			credentials.WithOPBinary(e.cfg.GetOPBinary()),
 			credentials.WithBWBinary(e.cfg.GetBWBinary()),
@@ -441,16 +433,8 @@ func (e *ToolExecutor) setupConfigFile() error {
 		if !ok {
 			return fmt.Errorf("missing credential config: %s", credName)
 		}
-		value, err := credentials.ResolveNamed(
-			credName,
-			credDef.Source,
-			credDef.Type,
-			credDef.AppID,
-			credDef.InstallationID,
-			credDef.PrivateKey,
-			credDef.APIURL,
-			credDef.Permissions,
-			credDef.Repositories,
+		value, err := credentials.Resolve(
+			credDef.ResolveInput(credName),
 			credentials.WithPassBinary(e.cfg.GetPassBinary()),
 			credentials.WithOPBinary(e.cfg.GetOPBinary()),
 			credentials.WithBWBinary(e.cfg.GetBWBinary()),

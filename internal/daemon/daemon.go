@@ -705,16 +705,8 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	case "check":
 		resp := protocol.AdminCheckResponse{Credentials: make(map[string]protocol.CredentialInfo), Version: d.version}
 		for name, credDef := range cfg.Credentials {
-			value, err := credentials.ResolveNamed(
-				name,
-				credDef.Source,
-				credDef.Type,
-				credDef.AppID,
-				credDef.InstallationID,
-				credDef.PrivateKey,
-				credDef.APIURL,
-				credDef.Permissions,
-				credDef.Repositories,
+			value, err := credentials.Resolve(
+				credDef.ResolveInput(name),
 				credentials.WithPassBinary(cfg.GetPassBinary()),
 				credentials.WithOPBinary(cfg.GetOPBinary()),
 				credentials.WithBWBinary(cfg.GetBWBinary()),

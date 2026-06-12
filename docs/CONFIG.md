@@ -823,6 +823,8 @@ Validated before every execution:
 | Writable bits | Must not be group- or world-writable |
 | Owner | UID must equal daemon EUID or root (UID 0) |
 
+These checks validate the helper file itself, not its directory. Keep the helper in a root-owned (or daemon-owned), non-group-writable directory — anyone with write access to the directory can replace the helper between validation and execution.
+
 #### Execution and errors
 
 | Parameter | Value |
