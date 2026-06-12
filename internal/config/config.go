@@ -173,9 +173,49 @@ type Config struct {
 	Tools       map[string]ToolDef       `yaml:"tools"`
 }
 
-// CredentialDef defines a credential source.
+// CredentialDef defines a credential source or dynamic provider.
 type CredentialDef struct {
-	Source string `yaml:"source"`
+	Source         string            `yaml:"source,omitempty"`
+	Type           string            `yaml:"type,omitempty"`
+	AppID          int64             `yaml:"app_id,omitempty"`
+	InstallationID int64             `yaml:"installation_id,omitempty"`
+	PrivateKey     string            `yaml:"private_key,omitempty"`
+	APIURL         string            `yaml:"api_url,omitempty"`
+	Permissions    map[string]string `yaml:"permissions,omitempty"`
+	Repositories   []string          `yaml:"repositories,omitempty"`
+}
+
+func (c CredentialDef) validate(name string) error {
+	source := strings.TrimSpace(c.Source)
+	typ := strings.TrimSpace(c.Type)
+	hasSource := source != ""
+	hasType := typ != ""
+
+	if hasSource && hasType {
+		return fmt.Errorf("credential %q: source and type are mutually exclusive", name)
+	}
+	if !hasSource && !hasType {
+		return fmt.Errorf("credential %q: empty source", name)
+	}
+	if !hasType {
+		return nil
+	}
+
+	switch typ {
+	case "github-app":
+		if c.AppID == 0 {
+			return fmt.Errorf("credential %q: github-app requires app_id", name)
+		}
+		if c.InstallationID == 0 {
+			return fmt.Errorf("credential %q: github-app requires installation_id", name)
+		}
+		if strings.TrimSpace(c.PrivateKey) == "" {
+			return fmt.Errorf("credential %q: github-app requires private_key", name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("credential %q: unknown credential type %q", name, typ)
+	}
 }
 
 // ToolDef defines a wrapped tool.
@@ -280,8 +320,8 @@ func (c *Config) Validate() error {
 	}
 
 	for name, cred := range c.Credentials {
-		if strings.TrimSpace(cred.Source) == "" {
-			return fmt.Errorf("credential %q: empty source", name)
+		if err := cred.validate(name); err != nil {
+			return err
 		}
 	}
 

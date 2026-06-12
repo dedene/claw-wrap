@@ -247,6 +247,7 @@ func credentialCacheKey(parsed *ParsedSource) string {
 
 func (c *credentialCache) fetchCached(
 	cacheKey string,
+	displaySource string,
 	now time.Time,
 	fetch func() (Credential, error),
 ) (Credential, error) {
@@ -270,7 +271,7 @@ func (c *credentialCache) fetchCached(
 	})
 	if err != nil {
 		if hasStale {
-			log.Printf("[WARN] credential refresh failed for %s, serving stale value: %v", cacheKey, err)
+			log.Printf("[WARN] credential refresh failed for %s, serving stale value: %v", displaySource, err)
 			return Credential{Value: stale.value, ExpiresAt: stale.hardExpiresAt}, nil
 		}
 		return Credential{}, err

@@ -112,7 +112,7 @@ func FetchCredential(source string, opts ...FetchOption) (Credential, error) {
 	now := credentialCacheNow()
 	if cacheEligible {
 		cacheKey := credentialCacheKey(parsed)
-		return credentialResultCache.fetchCached(cacheKey, now, func() (Credential, error) {
+		return credentialResultCache.fetchCached(cacheKey, source, now, func() (Credential, error) {
 			return fetchCredentialFromBackend(parsed, options)
 		})
 	}

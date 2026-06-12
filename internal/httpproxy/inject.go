@@ -41,7 +41,18 @@ func resolveHeaderValue(template string, creds map[string]config.CredentialDef, 
 			return ""
 		}
 
-		value, err := credentials.Fetch(cred.Source, opts...)
+		value, err := credentials.ResolveNamed(
+			name,
+			cred.Source,
+			cred.Type,
+			cred.AppID,
+			cred.InstallationID,
+			cred.PrivateKey,
+			cred.APIURL,
+			cred.Permissions,
+			cred.Repositories,
+			opts...,
+		)
 		if err != nil {
 			resolveErr = fmt.Errorf("resolve credential %q: %w", name, err)
 			return ""

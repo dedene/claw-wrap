@@ -84,6 +84,16 @@ var (
 	cleanupBWSessionFunc      = credentials.CleanupBWSession
 )
 
+func init() {
+	credentials.FetchSourceCredentialFunc = func(source string, opts ...credentials.FetchOption) (credentials.Credential, error) {
+		value, err := fetchCredentialFunc(source, opts...)
+		if err != nil {
+			return credentials.Credential{}, err
+		}
+		return credentials.Credential{Value: value}, nil
+	}
+}
+
 // Option configures the daemon.
 type Option func(*Daemon)
 
@@ -695,8 +705,16 @@ func (d *Daemon) handleAdminRequest(conn net.Conn, data []byte, cfg *config.Conf
 	case "check":
 		resp := protocol.AdminCheckResponse{Credentials: make(map[string]protocol.CredentialInfo), Version: d.version}
 		for name, credDef := range cfg.Credentials {
-			value, err := fetchCredentialFunc(
+			value, err := credentials.ResolveNamed(
+				name,
 				credDef.Source,
+				credDef.Type,
+				credDef.AppID,
+				credDef.InstallationID,
+				credDef.PrivateKey,
+				credDef.APIURL,
+				credDef.Permissions,
+				credDef.Repositories,
 				credentials.WithPassBinary(cfg.GetPassBinary()),
 				credentials.WithOPBinary(cfg.GetOPBinary()),
 				credentials.WithBWBinary(cfg.GetBWBinary()),
