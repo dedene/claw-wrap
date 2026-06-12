@@ -835,7 +835,7 @@ Non-zero exit, timeout, malformed JSON, or missing/empty `value` return an error
 
 ### jq Extraction
 
-All backends support jq extraction using the pipe syntax:
+All backends except `env:` and `exec-json:` support jq extraction using the pipe syntax:
 
 ```yaml
 credentials:

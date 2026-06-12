@@ -100,7 +100,7 @@ claw-wrap supports two approaches for credential injection:
 | [HashiCorp Vault](https://www.vaultproject.io/) | `vault:` | `vault:secret/myapp/key` | KV-v1 & KV-v2, external auth |
 | exec-json helper | `exec-json:` | `exec-json:/usr/local/lib/openclaw/mint-aws` | Helper prints `{"value":"…","expires_at":"…"}` on stdout; jq not supported |
 
-All backends except `env:` support jq extraction: `vault:secret/app/creds | .password`
+All backends except `env:` and `exec-json:` support jq extraction: `vault:secret/app/creds | .password`
 
 ### GitHub App (`type: github-app`)
 
