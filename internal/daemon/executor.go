@@ -16,8 +16,10 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -119,6 +121,9 @@ type ToolExecutor struct {
 	cmd       *exec.Cmd
 	pgid      int
 	stdinPipe io.WriteCloser
+	draining  atomic.Bool // set once the tool has exited; pumpers then read under a deadline
+	stdoutR   *os.File    // read end of the stdout pipe (pipe mode)
+	stderrR   *os.File    // read end of the stderr pipe (pipe mode)
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -133,6 +138,9 @@ type ToolExecutor struct {
 	sendMu  sync.Mutex
 
 	configDir string // temp dir for config file injection
+	workDir   string // effective cwd: tool.WorkingDir or req.Cwd
+
+	secretValues []string // resolved credential values, redacted from output
 
 	stdoutBuf *OutputBuffer
 	stderrBuf *OutputBuffer
@@ -193,16 +201,23 @@ func (e *ToolExecutor) Run() error {
 	defer e.cleanup()
 	e.startTime = time.Now()
 
+	// A configured working_dir wins over the caller's cwd, which may not exist
+	// on the daemon side (e.g. when the daemon runs in a sidecar container).
+	e.workDir = e.req.Cwd
+	if e.tool.WorkingDir != "" {
+		e.workDir = e.tool.WorkingDir
+	}
+
 	// Validate working directory is absolute
-	if !filepath.IsAbs(e.req.Cwd) {
-		log.Printf("[ERROR] working directory is not absolute: %s", e.req.Cwd)
+	if !filepath.IsAbs(e.workDir) {
+		log.Printf("[ERROR] working directory is not absolute: %s", e.workDir)
 		e.sendError("invalid working directory")
-		return fmt.Errorf("relative working directory: %s", e.req.Cwd)
+		return fmt.Errorf("relative working directory: %s", e.workDir)
 	}
 
 	// Verify working directory exists
-	if _, err := os.Stat(e.req.Cwd); os.IsNotExist(err) {
-		log.Printf("[ERROR] working directory does not exist: %s", e.req.Cwd)
+	if _, err := os.Stat(e.workDir); os.IsNotExist(err) {
+		log.Printf("[ERROR] working directory does not exist: %s", e.workDir)
 		e.sendError("invalid working directory")
 		return err
 	}
@@ -288,6 +303,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		if value == "" {
 			return "", fmt.Errorf("credential %s returned empty value", name)
 		}
+		e.secretValues = append(e.secretValues, value)
 		return value, nil
 	}
 
@@ -319,6 +335,10 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 		}
 		if forcedKeys[k] {
 			log.Printf("[WARN] Request attempted to override forced_env key %q, ignoring", k)
+			continue
+		}
+		if e.tool.RequestEnv != nil && !slices.Contains(e.tool.RequestEnv, k) {
+			log.Printf("[DEBUG] request env %q not in request_env allowlist, ignoring", k)
 			continue
 		}
 		envMap[k] = v
@@ -355,6 +375,7 @@ func (e *ToolExecutor) buildEnvironment() ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("build proxy URL: %w", err)
 			}
+			e.secretValues = append(e.secretValues, e.proxyAuthToken)
 		} else {
 			// No auth required - use simple URL without credentials
 			proxyURL = "http://" + e.cfg.GetHTTPProxyListen()
@@ -447,6 +468,7 @@ func (e *ToolExecutor) setupConfigFile() error {
 			return fmt.Errorf("empty credential: %s", credName)
 		}
 		credValues[credName] = value
+		e.secretValues = append(e.secretValues, value)
 	}
 
 	// Render template
@@ -471,7 +493,7 @@ func (e *ToolExecutor) startProcess(env []string) error {
 	}
 
 	e.cmd = exec.CommandContext(e.ctx, e.tool.Binary, e.req.Args...)
-	e.cmd.Dir = e.req.Cwd
+	e.cmd.Dir = e.workDir
 	e.cmd.Env = env
 
 	// Create new process group so we can kill all children
@@ -480,29 +502,43 @@ func (e *ToolExecutor) startProcess(env []string) error {
 		Pgid:    0,
 	}
 
-	// Set up pipes
-	stdout, err := e.cmd.StdoutPipe()
+	// Own the output pipes instead of using StdoutPipe/StderrPipe: Wait()
+	// closes those read ends as soon as the process exits, dropping output the
+	// pumpers have not consumed yet. With our own pipes the pumpers read to EOF
+	// (bounded by outputDrainGrace once the process has exited).
+	stdout, stdoutW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
-
-	stderr, err := e.cmd.StderrPipe()
+	stderr, stderrW, err := os.Pipe()
 	if err != nil {
+		stdout.Close()
+		stdoutW.Close()
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
+	e.stdoutR, e.stderrR = stdout, stderr
+	e.cmd.Stdout = stdoutW
+	e.cmd.Stderr = stderrW
 
-	stdin, err := e.cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
+	// use_stdin: false leaves cmd.Stdin nil, so the tool reads /dev/null and a
+	// prompt fails fast instead of waiting for input that never comes. Stdin
+	// messages from the wrapper are then dropped; signals still pass through.
+	if e.tool.GetUseStdin() {
+		stdin, err := e.cmd.StdinPipe()
+		if err != nil {
+			stdoutW.Close()
+			stderrW.Close()
+			return fmt.Errorf("stdin pipe: %w", err)
+		}
+		e.stdinPipe = stdin
 	}
-	e.stdinPipe = stdin
 
 	// Create output buffers
 	e.stdoutBuf = NewOutputBuffer("stdout", e.threshold, e.maxOutSz, e.sendMessage)
 	e.stderrBuf = NewOutputBuffer("stderr", e.threshold, e.maxOutSz, e.sendMessage)
-	if len(e.tool.RedactOutput) > 0 {
-		e.stdoutBuf.SetRedactor(NewOutputRedactor(e.tool.RedactOutput))
-		e.stderrBuf.SetRedactor(NewOutputRedactor(e.tool.RedactOutput))
+	if r := NewOutputRedactorWithSecrets(e.tool.RedactOutput, e.secretValues); r != nil {
+		e.stdoutBuf.SetRedactor(r)
+		e.stderrBuf.SetRedactor(NewOutputRedactorWithSecrets(e.tool.RedactOutput, e.secretValues))
 	}
 
 	// Wire up SHA256 hashers for audit output hash
@@ -514,7 +550,12 @@ func (e *ToolExecutor) startProcess(env []string) error {
 	}
 
 	// Start the process
-	if err := e.cmd.Start(); err != nil {
+	err = e.cmd.Start()
+	// The child holds its own copies of the write ends; close ours so the
+	// pumpers see EOF once every writer is gone.
+	stdoutW.Close()
+	stderrW.Close()
+	if err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
 
@@ -535,7 +576,7 @@ func (e *ToolExecutor) startProcess(env []string) error {
 // This enables interactive TUI applications to work correctly with colors and cursor control.
 func (e *ToolExecutor) startProcessWithPTY(env []string) error {
 	e.cmd = exec.CommandContext(e.ctx, e.tool.Binary, e.req.Args...)
-	e.cmd.Dir = e.req.Cwd
+	e.cmd.Dir = e.workDir
 	e.cmd.Env = env
 
 	// Start with PTY, using initial window size if provided so the child
@@ -564,8 +605,8 @@ func (e *ToolExecutor) startProcessWithPTY(env []string) error {
 	// Create single output buffer for PTY (stdout and stderr are merged)
 	// PTY mode always streams inline - no file buffering threshold
 	e.ptyBuf = NewOutputBuffer("stdout", 0, e.maxOutSz, e.sendMessage)
-	if len(e.tool.RedactOutput) > 0 {
-		e.ptyBuf.SetRedactor(NewOutputRedactor(e.tool.RedactOutput))
+	if r := NewOutputRedactorWithSecrets(e.tool.RedactOutput, e.secretValues); r != nil {
+		e.ptyBuf.SetRedactor(r)
 	}
 
 	// Wire up SHA256 hasher for audit output hash
@@ -702,6 +743,10 @@ func (e *ToolExecutor) runIOLoop() error {
 			}
 		}
 
+		// Bound the drain: a detached descendant (e.g. a daemon the tool
+		// started) may still hold the pipe write ends, so EOF might never come.
+		e.setOutputDrainDeadline()
+
 		// Wait for output pumpers to finish draining pipes
 		// Use a channel with timeout to avoid blocking forever
 		pumpersDone := make(chan struct{})
@@ -729,13 +774,13 @@ func (e *ToolExecutor) runIOLoop() error {
 
 	case <-e.ctx.Done():
 		// Timeout or cancellation
-		e.handleTimeout()
+		e.handleTimeout(waitDone)
 		return e.ctx.Err()
 	}
 }
 
 // stdoutPumper reads from stdout and writes to the output buffer.
-func (e *ToolExecutor) stdoutPumper(r io.Reader) {
+func (e *ToolExecutor) stdoutPumper(r *os.File) {
 	defer e.pumperWg.Done()
 
 	buf := make([]byte, 32*1024) // 32KB buffer
@@ -750,9 +795,12 @@ func (e *ToolExecutor) stdoutPumper(r io.Reader) {
 				}
 				log.Printf("[WARN] stdout write: %v", writeErr)
 			}
+			e.extendOutputDeadline(r)
 		}
 		if err != nil {
-			if err != io.EOF {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Printf("[WARN] tool %s exited but a descendant still holds its stdout; detach background processes from stdio", e.req.Tool)
+			} else if err != io.EOF {
 				log.Printf("[DEBUG] stdout read: %v", err)
 			}
 			return
@@ -761,7 +809,7 @@ func (e *ToolExecutor) stdoutPumper(r io.Reader) {
 }
 
 // stderrPumper reads from stderr and writes to the output buffer.
-func (e *ToolExecutor) stderrPumper(r io.Reader) {
+func (e *ToolExecutor) stderrPumper(r *os.File) {
 	defer e.pumperWg.Done()
 
 	buf := make([]byte, 32*1024) // 32KB buffer
@@ -776,9 +824,12 @@ func (e *ToolExecutor) stderrPumper(r io.Reader) {
 				}
 				log.Printf("[WARN] stderr write: %v", writeErr)
 			}
+			e.extendOutputDeadline(r)
 		}
 		if err != nil {
-			if err != io.EOF {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Printf("[WARN] tool %s exited but a descendant still holds its stderr; detach background processes from stdio", e.req.Tool)
+			} else if err != io.EOF {
 				log.Printf("[DEBUG] stderr read: %v", err)
 			}
 			return
@@ -937,35 +988,32 @@ func (e *ToolExecutor) finalizeOutput() error {
 		return nil
 	}
 
-	// Pipe mode uses separate stdout/stderr buffers
-	// Finalize stdout buffer
-	if e.stdoutBuf != nil {
-		if stdoutPath, err := e.stdoutBuf.Finalize(); err != nil {
-			return fmt.Errorf("finalize stdout: %w", err)
-		} else if stdoutPath != "" {
-			if err := e.streamFile(stdoutPath, protocol.MsgTypeStdout); err != nil {
-				return fmt.Errorf("stream stdout file: %w", err)
-			}
-			if err := os.Remove(stdoutPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[WARN] cleanup stdout temp file %s: %v", stdoutPath, err)
-			}
-		}
-	}
+	// Pipe mode uses separate stdout/stderr buffers. Finalize both even if one
+	// fails, so a stdout problem never swallows stderr.
+	return errors.Join(
+		e.finalizeStream(e.stdoutBuf, protocol.MsgTypeStdout),
+		e.finalizeStream(e.stderrBuf, protocol.MsgTypeStderr),
+	)
+}
 
-	// Finalize stderr buffer
-	if e.stderrBuf != nil {
-		if stderrPath, err := e.stderrBuf.Finalize(); err != nil {
-			return fmt.Errorf("finalize stderr: %w", err)
-		} else if stderrPath != "" {
-			if err := e.streamFile(stderrPath, protocol.MsgTypeStderr); err != nil {
-				return fmt.Errorf("stream stderr file: %w", err)
-			}
-			if err := os.Remove(stderrPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[WARN] cleanup stderr temp file %s: %v", stderrPath, err)
-			}
-		}
+// finalizeStream flushes one pipe-mode buffer and streams its spill file.
+func (e *ToolExecutor) finalizeStream(buf *OutputBuffer, streamType string) error {
+	if buf == nil {
+		return nil
 	}
-
+	path, err := buf.Finalize()
+	if err != nil {
+		return fmt.Errorf("finalize %s: %w", streamType, err)
+	}
+	if path == "" {
+		return nil
+	}
+	if err := e.streamFile(path, streamType); err != nil {
+		return fmt.Errorf("stream %s file: %w", streamType, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("[WARN] cleanup %s temp file %s: %v", streamType, path, err)
+	}
 	return nil
 }
 
@@ -997,6 +1045,39 @@ func (e *ToolExecutor) streamFile(path string, streamType string) error {
 	}
 }
 
+// outputDrainGrace bounds how long output is still read after the tool has
+// exited. Output the tool wrote before exiting is already buffered in the pipe
+// and drains immediately; the grace only matters when a detached descendant
+// inherited stdout/stderr and keeps the pipe open.
+const outputDrainGrace = time.Second
+
+// The deadline is idle-based: each pumper pushes it out again after handling a
+// chunk, so a slow client delaying sendMessage cannot cut off output that is
+// still buffered in the pipe.
+func (e *ToolExecutor) setOutputDrainDeadline() {
+	e.draining.Store(true)
+	for _, f := range []*os.File{e.stdoutR, e.stderrR} {
+		extendDrainDeadline(f)
+	}
+}
+
+// extendOutputDeadline re-arms the drain deadline after a pumper handled a
+// chunk, once the tool has exited.
+func (e *ToolExecutor) extendOutputDeadline(f *os.File) {
+	if e.draining.Load() {
+		extendDrainDeadline(f)
+	}
+}
+
+func extendDrainDeadline(f *os.File) {
+	if f == nil {
+		return
+	}
+	if err := f.SetReadDeadline(time.Now().Add(outputDrainGrace)); err != nil {
+		log.Printf("[DEBUG] set output drain deadline: %v", err)
+	}
+}
+
 // killProcessGroup sends a signal to the entire process group.
 func (e *ToolExecutor) killProcessGroup(sig syscall.Signal) error {
 	if e.pgid == 0 {
@@ -1009,7 +1090,9 @@ func (e *ToolExecutor) killProcessGroup(sig syscall.Signal) error {
 
 // handleTimeout gracefully terminates the process on timeout.
 // Sends SIGTERM first, waits 5 seconds, then SIGKILL if still running.
-func (e *ToolExecutor) handleTimeout() {
+// waitDone delivers the result of cmd.Wait(); it is the only safe way to
+// observe process exit while Wait runs in another goroutine.
+func (e *ToolExecutor) handleTimeout(waitDone <-chan error) {
 	log.Printf("[INFO] Tool timeout after %v", e.timeout)
 
 	// Send SIGTERM to process group
@@ -1017,25 +1100,19 @@ func (e *ToolExecutor) handleTimeout() {
 		log.Printf("[WARN] SIGTERM to process group: %v", err)
 	}
 
-	// Wait up to 5 seconds for graceful shutdown
-	gracePeriod := 5 * time.Second
-	deadline := time.Now().Add(gracePeriod)
-
-	for time.Now().Before(deadline) {
-		// Check if process has exited
-		if e.cmd.ProcessState != nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// If still running, send SIGKILL
-	if e.cmd.ProcessState == nil {
+	// Wait up to 5 seconds for graceful shutdown, then SIGKILL
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
 		log.Printf("[INFO] Process still running after SIGTERM, sending SIGKILL")
 		if err := e.killProcessGroup(syscall.SIGKILL); err != nil {
 			log.Printf("[WARN] SIGKILL to process group: %v", err)
 		}
 	}
+
+	// Output written before the kill is drained; a descendant holding the
+	// pipes open must not stall the timeout path.
+	e.setOutputDrainDeadline()
 
 	// Wait for output pumpers to finish (with timeout)
 	pumpersDone := make(chan struct{})
@@ -1071,6 +1148,14 @@ func (e *ToolExecutor) cleanup() {
 	if e.stdinPipe != nil {
 		e.stdinPipe.Close()
 		e.stdinPipe = nil
+	}
+
+	// Close output pipe read ends (pipe mode)
+	if e.stdoutR != nil {
+		e.stdoutR.Close()
+	}
+	if e.stderrR != nil {
+		e.stderrR.Close()
 	}
 
 	// Close PTY master if still open (PTY mode)
@@ -1131,7 +1216,7 @@ func (e *ToolExecutor) emitAuditEntry(exitCode int, timeout bool) {
 	entry := audit.Entry{
 		Timestamp:   e.startTime.UTC().Format(time.RFC3339),
 		Tool:        e.req.Tool,
-		Cwd:         e.req.Cwd,
+		Cwd:         e.workDir,
 		CallerPID:   e.callerPID,
 		CallerExe:   e.callerExe,
 		ExitCode:    exitCode,

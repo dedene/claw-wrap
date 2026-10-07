@@ -9,10 +9,32 @@ import (
 	"strings"
 )
 
-// RuntimeDir returns the platform-appropriate runtime directory.
+// RuntimeDirEnv overrides the runtime directory (socket, HMAC auth file,
+// proxy auth token) for both the daemon and the wrapper. Containers use it to
+// point both sides at a directory inside a shared volume. Must be absolute.
+const RuntimeDirEnv = "CLAW_WRAP_RUNTIME_DIR"
+
+// RuntimeDir returns the runtime directory: $CLAW_WRAP_RUNTIME_DIR when set to
+// an absolute path, otherwise the platform default.
 //   - Linux: /run/openclaw (created by systemd RuntimeDirectory=)
 //   - macOS: $TMPDIR/openclaw (per-user, permission-restricted)
 func RuntimeDir() string {
+	if dir := os.Getenv(RuntimeDirEnv); dir != "" && filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return defaultRuntimeDir()
+}
+
+// ValidateRuntimeDirEnv reports a set but unusable $CLAW_WRAP_RUNTIME_DIR, which
+// RuntimeDir would otherwise silently ignore.
+func ValidateRuntimeDirEnv() error {
+	if dir := os.Getenv(RuntimeDirEnv); dir != "" && !filepath.IsAbs(dir) {
+		return fmt.Errorf("%s must be an absolute path, got %q", RuntimeDirEnv, dir)
+	}
+	return nil
+}
+
+func defaultRuntimeDir() string {
 	if runtime.GOOS == "darwin" {
 		return filepath.Join(os.TempDir(), "openclaw")
 	}
@@ -29,9 +51,11 @@ func AuthPath() string {
 	return filepath.Join(RuntimeDir(), "auth")
 }
 
-// EnvFile returns the default env credential file path.
+// EnvFile returns the default env credential file path. It deliberately ignores
+// $CLAW_WRAP_RUNTIME_DIR: an overridden runtime dir may be shared with the
+// client, and credentials must never live there.
 func EnvFile() string {
-	return filepath.Join(RuntimeDir(), "env")
+	return filepath.Join(defaultRuntimeDir(), "env")
 }
 
 // ProxyAuthTokenPath returns the default HTTP proxy auth token file path.

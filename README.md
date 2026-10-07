@@ -92,7 +92,8 @@ claw-wrap supports two approaches for credential injection:
 | Backend | Prefix | Example | Notes |
 | ------- | ------ | ------- | ----- |
 | [pass](https://www.passwordstore.org/) | `pass:` | `pass:cli/github/token` | Default when no prefix given |
-| Environment | `env:` | `env:MY_TOKEN` | Reads from daemon environment |
+| Environment file | `env:` | `env:MY_TOKEN` | Reads `KEY=value` lines from `/run/openclaw/env` |
+| Secret file | `file:` | `file:/etc/claw-wrap/secrets/token` | Docker/Kubernetes secret mounts; re-read on every use |
 | [1Password](https://1password.com/) | `op://` | `op://Vault/Item/field` | Requires `op` CLI, session auth |
 | [Bitwarden](https://bitwarden.com/) | `bw:` | `bw:item-uuid` | Requires `bw` CLI, session managed |
 | [macOS Keychain](https://support.apple.com/guide/keychain-access/) | `keychain:` | `keychain:service-name` | macOS only |
@@ -341,6 +342,10 @@ claw-wrap works with deny-by-default sandboxes where credentials directories (`~
 See [docs/SANDBOX.md](docs/SANDBOX.md) for the full guide — firejail profile, nono setup,
 self-restart mechanism, and verification steps.
 
+## Containers and Kubernetes
+
+claw-wrap can run as a sidecar: the agent container gets only the client binary, and the sidecar holds the credentials and runs the real tools. The repository `Dockerfile` builds a small base image to extend with your tools. See [docs/KUBERNETES.md](docs/KUBERNETES.md) for the pod layout, security model and a tested manifest.
+
 ## Documentation
 
 - [Installation Guide](docs/INSTALL.md) — full setup with `pass`, systemd, and troubleshooting
@@ -348,6 +353,7 @@ self-restart mechanism, and verification steps.
   args, output redaction, config file injection
 - [HTTP Proxy Setup](docs/CONFIG.md#http-proxy-settings) — MITM proxy for API credential injection
 - [Sandbox Setup](docs/SANDBOX.md) — firejail (Linux) and nono (macOS) with verification steps
+- [Kubernetes Sidecar](docs/KUBERNETES.md) — shared socket volume, UID/GID setup, Secrets, probes, audit
 - [Protocol Specification](docs/SPEC.md) — HMAC authentication, message framing, proxy protocol
 
 ## Usage
@@ -355,6 +361,7 @@ self-restart mechanism, and verification steps.
 ```bash
 # Daemon mode (usually via systemd)
 claw-wrap daemon
+claw-wrap daemon --uid 1000 --runtime-gid 2000 --socket-mode 0660 --auth-mode 0640  # shared with another UID
 
 # Admin commands
 claw-wrap list      # List configured tools

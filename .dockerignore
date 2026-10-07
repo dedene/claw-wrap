@@ -1,0 +1,11 @@
+.git
+.github
+.claude
+.pi
+.env
+build
+dist
+tmp
+docs
+examples
+*.md

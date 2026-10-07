@@ -34,6 +34,13 @@ import (
 // DefaultSocketPath is the default Unix socket path.
 var DefaultSocketPath = paths.SocketPath()
 
+const (
+	defaultAuthFileMode   = os.FileMode(0o600)
+	defaultSocketFileMode = os.FileMode(0o600)
+	defaultRuntimeDirMode = os.FileMode(0o700)
+	sharedRuntimeDirMode  = os.FileMode(0o750)
+)
+
 // Ucred holds Unix peer credentials.
 type Ucred struct {
 	PID int32
@@ -46,6 +53,9 @@ type Daemon struct {
 	socketPath      string
 	configPath      string
 	allowedUID      uint32
+	runtimeGID      int
+	authFileMode    os.FileMode
+	socketFileMode  os.FileMode
 	allowedBinaries []string
 	version         string
 	listener        net.Listener
@@ -66,6 +76,8 @@ type Daemon struct {
 	configWatcherWg   sync.WaitGroup
 	configWatcherMu   sync.Mutex
 	configWatcherInit bool
+
+	unverifiedExeOnce sync.Once
 	configStopCh      chan struct{}
 }
 
@@ -112,6 +124,21 @@ func WithAllowedUID(uid uint32) Option {
 	return func(d *Daemon) { d.allowedUID = uid }
 }
 
+// WithRuntimeGID sets an optional shared GID for runtime artifacts.
+func WithRuntimeGID(gid int) Option {
+	return func(d *Daemon) { d.runtimeGID = gid }
+}
+
+// WithAuthFileMode sets the mode used for the HMAC auth file.
+func WithAuthFileMode(mode os.FileMode) Option {
+	return func(d *Daemon) { d.authFileMode = mode }
+}
+
+// WithSocketFileMode sets the mode used for the Unix socket.
+func WithSocketFileMode(mode os.FileMode) Option {
+	return func(d *Daemon) { d.socketFileMode = mode }
+}
+
 // WithAllowedBinaries sets the allowed binary paths.
 func WithAllowedBinaries(binaries []string) Option {
 	return func(d *Daemon) { d.allowedBinaries = binaries }
@@ -151,6 +178,9 @@ func New(opts ...Option) *Daemon {
 		socketPath:         DefaultSocketPath,
 		configPath:         config.DefaultConfigPath,
 		allowedUID:         uint32(os.Getuid()),
+		runtimeGID:         -1,
+		authFileMode:       defaultAuthFileMode,
+		socketFileMode:     defaultSocketFileMode,
 		allowedBinaries:    allowed,
 		metrics:            newSecurityMetrics(),
 		proxyAuthTokenPath: paths.ProxyAuthTokenPath(),
@@ -163,11 +193,25 @@ func New(opts ...Option) *Daemon {
 
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run() error {
+	if err := paths.ValidateRuntimeDirEnv(); err != nil {
+		return err
+	}
+	if d.runtimeGID < -1 {
+		return fmt.Errorf("runtime gid must be >= 0 when set")
+	}
+	if !IsAllowedAuthFileMode(d.authFileMode) {
+		return fmt.Errorf("invalid auth file mode %04o", d.authFileMode)
+	}
+	if !IsAllowedSocketFileMode(d.socketFileMode) {
+		return fmt.Errorf("invalid socket file mode %04o", d.socketFileMode)
+	}
+
 	cfg, err := config.Load(d.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 	log.Printf("[INFO] Loaded %d credentials from config", len(cfg.Credentials))
+	warnIfNoTools(cfg)
 	setAgeIdentityFileFunc(cfg.GetAgeIdentityFile())
 	setOPTokenFileFunc(cfg.GetOPTokenFile())
 	setCredentialCacheTTLFunc(cfg.GetCredentialCacheTTL())
@@ -192,16 +236,19 @@ func (d *Daemon) Run() error {
 	d.secret = secret
 
 	secretPath := cfg.GetHMACSecretFile()
-	if err := auth.WriteSecret(secretPath, secret); err != nil {
+	if err := auth.WriteSecretWithMode(secretPath, secret, d.authFileMode); err != nil {
 		return fmt.Errorf("write HMAC secret: %w", err)
+	}
+	if err := d.applyRuntimePathOwnership(secretPath); err != nil {
+		return fmt.Errorf("chgrp auth file: %w", err)
 	}
 	log.Printf("[INFO] HMAC secret written to %s", secretPath)
 
 	runtimeDir := paths.RuntimeDir()
-	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+	if err := os.MkdirAll(runtimeDir, d.runtimeDirMode()); err != nil {
 		return fmt.Errorf("create runtime dir: %w", err)
 	}
-	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+	if err := d.applyRuntimeDirPermissions(runtimeDir); err != nil {
 		return fmt.Errorf("chmod runtime dir: %w", err)
 	}
 
@@ -217,8 +264,11 @@ func (d *Daemon) Run() error {
 	}
 	d.listener = listener
 
-	if err := os.Chmod(d.socketPath, 0o600); err != nil {
+	if err := os.Chmod(d.socketPath, d.socketFileMode); err != nil {
 		return fmt.Errorf("chmod socket: %w", err)
+	}
+	if err := d.applyRuntimePathOwnership(d.socketPath); err != nil {
+		return fmt.Errorf("chgrp socket: %w", err)
 	}
 
 	d.cfgMu.Lock()
@@ -292,6 +342,51 @@ func (d *Daemon) Run() error {
 	}
 }
 
+func (d *Daemon) runtimeDirMode() os.FileMode {
+	if d.runtimeGID >= 0 {
+		return sharedRuntimeDirMode
+	}
+	return defaultRuntimeDirMode
+}
+
+func (d *Daemon) applyRuntimeDirPermissions(path string) error {
+	if err := d.applyRuntimePathOwnership(path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() == d.runtimeDirMode() {
+		return nil
+	}
+	if err := os.Chmod(path, d.runtimeDirMode()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *Daemon) applyRuntimePathOwnership(path string) error {
+	if d.runtimeGID < 0 {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		if int(stat.Gid) == d.runtimeGID {
+			return nil
+		}
+	}
+
+	if err := os.Chown(path, -1, d.runtimeGID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *Daemon) acquireConnSlot() bool {
 	select {
 	case d.connSem <- struct{}{}:
@@ -313,6 +408,7 @@ func (d *Daemon) reloadConfig() error {
 	if err != nil {
 		return err
 	}
+	warnIfNoTools(newCfg)
 
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
@@ -383,6 +479,18 @@ func (d *Daemon) reloadConfig() error {
 // Editors often emit multiple events per save (rename+create, write+chmod).
 const configWatchDebounce = 500 * time.Millisecond
 
+// warnIfNoTools flags a config that makes every wrapped call fail with
+// "unknown tool".
+func warnIfNoTools(cfg *config.Config) {
+	if len(cfg.Tools) == 0 {
+		log.Printf("[WARN] no tools configured: every wrapped call will be rejected as an unknown tool")
+	}
+}
+
+// kubernetesDataLink is the symlink kubelet swaps when a ConfigMap or Secret
+// volume changes.
+const kubernetesDataLink = "..data"
+
 // startConfigWatcher starts an fsnotify watcher on the config file directory.
 // It calls reloadConfig when the config file changes. Non-fatal if it fails.
 func (d *Daemon) startConfigWatcher() error {
@@ -442,7 +550,9 @@ func (d *Daemon) configWatchLoop(stopCh <-chan struct{}, events <-chan fsnotify.
 				return
 			}
 
-			if filepath.Base(event.Name) != configFile {
+			// Kubernetes ConfigMap volumes update by atomically swapping the
+			// ..data symlink; no event names the config file itself.
+			if base := filepath.Base(event.Name); base != configFile && base != kubernetesDataLink {
 				continue
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Chmod|fsnotify.Rename) == 0 {
@@ -641,6 +751,9 @@ func (d *Daemon) handleConnection(conn net.Conn, cfg *config.Config) {
 		log.Printf("[DEBUG] peer pid=%d uid=%d exe=%s", ucred.PID, ucred.UID, callerExe)
 	} else {
 		log.Printf("[DEBUG] peer pid=%d uid=%d exe=unverified", ucred.PID, ucred.UID)
+		d.unverifiedExeOnce.Do(func() {
+			log.Printf("[INFO] caller executable cannot be verified (peer pid=%d, e.g. a separate PID namespace); requests are authorized by UID + HMAC only", ucred.PID)
+		})
 	}
 
 	switch {
@@ -1128,6 +1241,7 @@ func auditConfigChanged(old, new *config.Config) bool {
 	}
 	return oa.Enabled != na.Enabled ||
 		oa.File != na.File ||
+		oa.Stdout != na.Stdout ||
 		oa.Syslog != na.Syslog ||
 		oa.SyslogFacility != na.SyslogFacility
 }

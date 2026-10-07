@@ -13,6 +13,21 @@ The runtime directory varies by platform:
 
 Examples in this document use Linux paths. On macOS, substitute `$TMPDIR/openclaw/` for `/run/openclaw/`.
 
+Set `CLAW_WRAP_RUNTIME_DIR` (absolute path) to move the socket, auth file and proxy auth token, for example onto a volume shared between containers. The daemon and the wrapper both read it, so set it on both sides. The `env:` credential file does not move.
+
+### Daemon flags
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--config PATH` | `/etc/openclaw/wrappers.yaml` | Config file |
+| `--socket PATH` | `<runtime dir>/secrets.sock` | Socket path |
+| `--uid UID` | daemon's UID | Only this peer UID may connect |
+| `--runtime-gid GID` | unset | Group for runtime dir (`0750`), socket and auth file |
+| `--socket-mode MODE` | `0600` | `0600` or `0660` |
+| `--auth-mode MODE` | `0600` | `0600` or `0640` |
+
+The last three let a client with a different UID reach the daemon through a shared group. See [KUBERNETES.md](KUBERNETES.md).
+
 ## Minimal Example
 
 A single tool (`gh`) with one credential:
@@ -525,6 +540,24 @@ Set to `true` to reject connections when `/proc/<pid>/exe` is unreadable (opt-in
 In firejail deployments this can fail closed unexpectedly depending on host `/proc`
 policy (`hidepid`, ptrace restrictions), so test carefully before enabling.
 
+## Audit Log
+
+```yaml
+audit:
+  enabled: true
+  file: /var/log/claw-wrap/audit.jsonl   # JSONL file, created 0600
+  stdout: false                          # JSONL on the daemon's stdout (containers)
+  syslog: false
+  syslog_facility: local0
+  include_args: true                     # default true
+  include_output_hash: true              # default true
+  include_duration: true                 # default true
+```
+
+At least one of `file`, `stdout` or `syslog` is required. Each completed call produces one entry with the tool, arguments, working directory, caller PID and executable (when verifiable), exit code, output size and hash. Environment variables and credential values are never logged.
+
+`file` must not be a symlink, so use `stdout: true` rather than `file: /dev/stdout`. Daemon logs go to stderr, which keeps the two streams separate.
+
 ## Credential Sources
 
 ### Password Store (`pass`)
@@ -551,6 +584,29 @@ Security requirements for `/run/openclaw/env`:
 - Must be a regular file (symlinks are rejected)
 - Must be owned by the daemon user
 - Mode must be `0600` or `0640`
+
+### Mounted secret file (`file:`)
+
+```yaml
+credentials:
+  api-token:
+    source: file:/etc/claw-wrap/secrets/api-token
+  oauth-client:
+    source: file:/etc/claw-wrap/secrets/client.json | .client_secret
+```
+
+Reads a whole file, the convention for Docker and Kubernetes secret mounts. Docker and Compose secrets default to mode `0444`, which is rejected; set `mode: 0400` or `0440` on the secret. Trailing newlines are trimmed. jq extraction works on JSON files.
+
+Rules, checked on every read:
+- Path must be absolute
+- Symlinks are followed (Kubernetes secret volumes are `..data` symlinks)
+- Must resolve to a regular file of at most 64 KiB
+- Owner must be root or the daemon user
+- Must not be group-writable or have any permission bits for others (`0400`, `0440`, `0600` and `0640` are fine)
+
+The value is not cached, so a rotated secret applies on the next call.
+
+Prefer `file:` over `env:` in containers: the `env:` file must be a non-symlink owned by the daemon user, which a Kubernetes Secret volume cannot provide.
 
 ### 1Password (`op://`)
 
@@ -896,6 +952,8 @@ tools:
       API_SECRET: my-api-secret
 ```
 
+Every credential value injected through `env` or `config_file` (8 bytes or longer), and the HTTP proxy auth token, is redacted from the tool's stdout and stderr as `[REDACTED]`, before any `redact_output` rules run. This catches a tool that prints its token verbatim in debug output or an error message. It only matches the exact value: base64, URL-encoded or otherwise transformed copies pass through, so it is a safety net, not a guarantee. Environment variables never appear in the audit log.
+
 ### `forced_env` (optional)
 
 Environment variables that are always set. The agent cannot override these.
@@ -956,6 +1014,33 @@ tools:
         message: "Only informational commands allowed"
 ```
 
+`allowed_args` also supports `match: argv`, which matches arguments by position:
+
+```yaml
+tools:
+  mcparcel:
+    binary: /usr/local/bin/mcparcel
+    mode: allowlist
+    allowed_args:
+      - match: argv
+        argv:
+          - 'call'
+          - 'front\.(read_conversation|create_draft)'
+          - '--args'
+          - '(?s)\{.*\}'
+        message: "only allowlisted tools"
+      - match: argv
+        argv: ['call', 'front\.list_tags']
+```
+
+- The command must have exactly as many arguments as `argv` has patterns
+- Each pattern must match its whole argument; patterns are anchored as `^(?:pattern)$`
+- `.` does not match newlines unless the pattern starts with `(?s)`
+- List several rules for optional arguments; any matching rule allows the call
+- `pattern` and `argv` are mutually exclusive; `argv` is not available in `blocked_args`
+
+Prefer `argv` over `match: command` for tools with subcommands and flags. `command` joins the arguments with spaces before matching, so argument boundaries disappear: with `^call\s+front\.read(\s|$)`, the calls `call front.read --server https://evil.example` and `call "front.read front.delete"` both pass, and only `blocked_args` stands between them and the tool. With `argv` every position is pinned, so flags before or after the subcommand, extra arguments, and arguments containing spaces or newlines are rejected.
+
 When both `blocked_args` and `allowed_args` are present (with `mode: allowlist`):
 1. `blocked_args` are checked first (any match = deny)
 2. `allowed_args` are checked next (at least one must match)
@@ -986,6 +1071,52 @@ Behavior notes:
 - Works for both inline and file-backed output responses
 - Rules are applied in order
 - Invalid regex patterns are rejected during config validation
+- To catch matches across chunk boundaries, the last 128 bytes are held back until more output arrives or the tool exits. A prompt without a trailing newline can stay invisible until then, so avoid `redact_output` on interactive tools
+- Injected credential values are redacted before these rules run and hold back only a trailing partial match, so they do not delay prompts
+
+### `working_dir` (optional)
+
+Absolute directory the tool runs in. By default the tool runs in the caller's working directory, and the call fails with `invalid working directory` when that directory does not exist on the daemon's side. Set `working_dir` when the daemon runs in another container or on another filesystem.
+
+```yaml
+tools:
+  mcparcel:
+    binary: /usr/local/bin/mcparcel
+    working_dir: /var/lib/claw-wrap
+```
+
+### `use_pty` (optional)
+
+Default `true`: when the caller's stdin is a terminal, the tool gets a pseudo-terminal (colors, interactive prompts, TUIs). Set `false` to always use plain pipes.
+
+### `use_stdin` (optional)
+
+Default `true`: the caller's stdin is forwarded to the tool. With `false` the tool reads from `/dev/null`, so a tool that prompts for input fails immediately instead of waiting until `timeout`. Use it for tools that agents call non-interactively. `use_stdin: false` turns PTY mode off as well; combining it with `use_pty: true` is a config error.
+
+### `request_env` (optional)
+
+Allowlist of environment variables the caller may set for this tool. By default the caller may set any variable that is not on the built-in deny list (`BASH_ENV`, `LD_*`, proxy variables and similar), but tool-specific variables are not on that list. When the caller is untrusted, an unexpected variable such as a config path or server URL can change where the tool sends its credentials.
+
+```yaml
+tools:
+  mcparcel:
+    binary: /usr/local/bin/mcparcel
+    request_env: []                # accept no caller env at all
+  gh:
+    binary: /usr/bin/gh
+    request_env: [TERM, COLORTERM] # what the wrapper sends for terminals
+```
+
+Unset keeps the default behaviour. `env` entries can never be overridden by the caller either way.
+
+### Tools that start background processes
+
+Each call runs in its own process group. When the call ends, claw-wrap kills that group, and it stops reading output one second after the tool exits. A tool that starts a long-lived daemon on first use must therefore:
+
+- start the daemon in a new session (`setsid`), so the process group kill does not reach it
+- redirect the daemon's stdin, stdout and stderr to `/dev/null` or a log file
+
+A daemon that keeps the tool's stdout or stderr open does not block the call, but claw-wrap logs a warning and the daemon's next write to that pipe fails (usually with `SIGPIPE`). In containers, run claw-wrap under an init process such as `tini` so detached daemons are reaped.
 
 ### `config_file` (optional)
 
