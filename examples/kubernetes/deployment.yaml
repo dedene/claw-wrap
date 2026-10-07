@@ -1,0 +1,136 @@
+# claw-wrap as a sidecar: the agent container holds no secrets and reaches
+# wrapped tools only through the claw-wrap socket on a shared emptyDir.
+#
+# Prerequisites (see docs/KUBERNETES.md):
+#   kubectl create configmap claw-wrap-config --from-file=wrappers.yaml=examples/mcparcel/wrappers.yaml
+#   kubectl create secret generic claw-wrap-secrets \
+#     --from-file=front-client-id=./front-client-id \
+#     --from-file=front-client-secret=./front-client-secret
+#
+# Replace the two images: the sidecar image is FROM ghcr.io/dedene/claw-wrap
+# plus the real tool binary; the agent image contains the claw-wrap binary and
+# a symlink named after the tool.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      automountServiceAccountToken: false
+      # Keep PID namespaces separate: the agent must not see the sidecar's
+      # processes (or their environment). Consequence: claw-wrap cannot verify
+      # the caller's executable (peer PID is 0); the boundary is the UID check
+      # plus the HMAC secret, and only containers that mount the ipc volume can
+      # reach the socket at all.
+      shareProcessNamespace: false
+      securityContext:
+        runAsNonRoot: true
+        # Shared group for the ipc volume and the Secret files. Every container
+        # in the pod gets it as a supplementary group.
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Native sidecar (Kubernetes >= 1.29): starts before the agent and keeps
+        # running. On older clusters, move it to `containers` and drop
+        # restartPolicy; the agent then has to retry until the socket exists.
+        - name: claw-wrap
+          image: registry.example.com/claw-wrap-mcparcel:1.0.0
+          restartPolicy: Always
+          args:
+            - daemon
+            - --uid
+            - "1000"            # the agent's UID; every other UID is rejected
+            - --runtime-gid
+            - "2000"            # = fsGroup
+            - --socket-mode
+            - "0660"
+            - --auth-mode
+            - "0640"
+          env:
+            # Both containers must agree on this path. The daemon creates the
+            # directory itself (it cannot chmod the root-owned emptyDir mount).
+            - name: CLAW_WRAP_RUNTIME_DIR
+              value: /run/claw-wrap/ipc
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "test -S /run/claw-wrap/ipc/secrets.sock && test -s /run/claw-wrap/ipc/auth"]
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -S /run/claw-wrap/ipc/secrets.sock && test -s /run/claw-wrap/ipc/auth"]
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: ipc
+              mountPath: /run/claw-wrap
+            # Mount the whole ConfigMap (no subPath) so updates reach the pod;
+            # claw-wrap reloads on the ..data symlink swap.
+            - name: config
+              mountPath: /etc/openclaw
+              readOnly: true
+            # Secrets are mounted into the sidecar only.
+            - name: secrets
+              mountPath: /etc/claw-wrap/secrets
+              readOnly: true
+            # HOME and tool working_dir: tool state (e.g. a daemon's socket or
+            # token cache) lives here, invisible to the agent.
+            - name: state
+              mountPath: /var/lib/claw-wrap
+            # Output buffering and config_file temp dirs.
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: agent
+          image: registry.example.com/agent:latest
+          env:
+            - name: CLAW_WRAP_RUNTIME_DIR
+              value: /run/claw-wrap/ipc
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: ipc
+              mountPath: /run/claw-wrap
+      volumes:
+        - name: ipc
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: config
+          configMap:
+            name: claw-wrap-config
+        - name: secrets
+          secret:
+            secretName: claw-wrap-secrets
+            defaultMode: 0440   # root:fsGroup, readable by the sidecar only (only it mounts this)
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
