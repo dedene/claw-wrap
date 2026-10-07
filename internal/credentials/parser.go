@@ -18,6 +18,7 @@ const (
 	BackendBitwarden Backend = "bw"
 	BackendVault     Backend = "vault"
 	BackendExecJSON  Backend = "exec-json"
+	BackendFile      Backend = "file"
 )
 
 // ParsedSource represents a parsed credential source URI.
@@ -42,6 +43,8 @@ type ParsedSource struct {
 //   - age:/path/to/file.age | .jq_expr
 //   - vault:secret/myapp/api-key
 //   - vault:secret/myapp/api-key | .password
+//   - file:/etc/claw-wrap/secrets/token
+//   - file:/etc/claw-wrap/secrets/creds.json | .client_secret
 //   - path/in/store (legacy, assumed pass)
 func ParseSource(source string) (*ParsedSource, error) {
 	if source == "" {
@@ -86,6 +89,9 @@ func ParseSource(source string) (*ParsedSource, error) {
 	case strings.HasPrefix(source, "vault:"):
 		backend = BackendVault
 		path = strings.TrimPrefix(source, "vault:")
+	case strings.HasPrefix(source, "file:"):
+		backend = BackendFile
+		path = strings.TrimPrefix(source, "file:")
 	case strings.HasPrefix(source, "exec-json:"):
 		backend = BackendExecJSON
 		path = strings.TrimPrefix(source, "exec-json:")

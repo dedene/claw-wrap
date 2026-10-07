@@ -138,6 +138,18 @@ func fetchCredentialFromBackend(parsed *ParsedSource, options *FetchOptions) (Cr
 			}
 		}
 
+	case BackendFile:
+		result, err = fetchFromFile(parsed.Path)
+		if err != nil {
+			return Credential{}, err
+		}
+		if parsed.HasJQ() {
+			result, err = ApplyJQ(ctx, []byte(result), parsed.JQExpr)
+			if err != nil {
+				return Credential{}, err
+			}
+		}
+
 	case BackendPass:
 		result, err = fetchFromPass(options.PassBinary, parsed.Path)
 		if err != nil {
