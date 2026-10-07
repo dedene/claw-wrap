@@ -106,3 +106,88 @@ func TestOutputRedactor_SecretsBeforeToolRules(t *testing.T) {
 		t.Fatalf("redacted = %q, want key=[REDACTED]", got)
 	}
 }
+
+// A prompt without a trailing newline must reach the caller while the tool
+// waits for input, even when the tool has credentials to redact.
+func TestExecutor_PromptVisibleWithCredentialRedaction(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(secretPath, []byte("tok_live_123456"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Credentials: map[string]config.CredentialDef{
+		"token": {Source: "file:" + secretPath},
+	}}
+	tool := helperTool("prompt")
+	tool.Timeout = "3s"
+	tool.Env["API_TOKEN"] = "token"
+
+	clientAnswer = "Continue? [y/N] "
+	t.Cleanup(func() { clientAnswer = "" })
+
+	res := runHelperToolWith(t, tool, protocol.ProxyRequest{}, cfg, nil)
+	if res.timeout {
+		t.Fatalf("prompt was held back by the redactor; tool timed out (stdout=%q)", res.stdout)
+	}
+	if res.stdout != "Continue? [y/N] answer:y\n" {
+		t.Fatalf("stdout = %q", res.stdout)
+	}
+}
+
+func redactAll(r *OutputRedactor, chunks ...string) (emitted []string, total string) {
+	var b strings.Builder
+	for _, c := range chunks {
+		out := string(r.RedactChunk([]byte(c), false))
+		emitted = append(emitted, out)
+		b.WriteString(out)
+	}
+	b.Write(r.RedactChunk(nil, true))
+	return emitted, b.String()
+}
+
+func TestOutputRedactor_ReleasesBytesThatCannotBeASecret(t *testing.T) {
+	r := NewOutputRedactorWithSecrets(nil, []string{"tok_live_123456"})
+
+	emitted, total := redactAll(r, "Continue? [y/N] ", "key=tok_", "live_123456 end", " and tok_x")
+	if emitted[0] != "Continue? [y/N] " {
+		t.Errorf("prompt held back: %q", emitted[0])
+	}
+	if emitted[1] != "key=" {
+		t.Errorf("chunk 2 = %q, want only the part that cannot start the secret", emitted[1])
+	}
+	if emitted[2] != "[REDACTED] end" {
+		t.Errorf("chunk 3 = %q", emitted[2])
+	}
+	if total != "Continue? [y/N] key=[REDACTED] end and tok_x" {
+		t.Errorf("total = %q", total)
+	}
+}
+
+// Custom rules must never see a secret that is still arriving.
+func TestOutputRedactor_ToolRulesCannotBreakSplitSecret(t *testing.T) {
+	cfg := &config.Config{Tools: map[string]config.ToolDef{
+		"t": {Binary: "/usr/bin/true", RedactOutput: []config.ToolRedactRule{{Pattern: "tok", Replace: "***"}}},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r := NewOutputRedactorWithSecrets(cfg.Tools["t"].RedactOutput, []string{"tok_live_123456"})
+	if _, total := redactAll(r, "key=tok_", "live_123456"); total != "key=[REDACTED]" {
+		t.Fatalf("total = %q, want key=[REDACTED]", total)
+	}
+	r = NewOutputRedactorWithSecrets(cfg.Tools["t"].RedactOutput, []string{"tok_live_123456"})
+	if _, total := redactAll(r, "a tok b"); total != "a *** b" {
+		t.Fatalf("tool rule on non-secret text: %q", total)
+	}
+}
+
+// When one secret is a prefix of another, wait for the longer one.
+func TestOutputRedactor_PrefixSecrets(t *testing.T) {
+	r := NewOutputRedactorWithSecrets(nil, []string{"abcdefgh", "abcdefgh12"})
+	if _, total := redactAll(r, "x abcdefgh", "12 y"); total != "x [REDACTED] y" {
+		t.Fatalf("total = %q", total)
+	}
+	r = NewOutputRedactorWithSecrets(nil, []string{"abcdefgh", "abcdefgh12"})
+	if _, total := redactAll(r, "x abcdefgh", "1"); total != "x [REDACTED]1" {
+		t.Fatalf("shorter secret must still be redacted once the longer one is ruled out: %q", total)
+	}
+}

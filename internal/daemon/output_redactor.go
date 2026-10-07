@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"regexp"
 	"sort"
 
@@ -14,9 +15,18 @@ type outputRedactionRule struct {
 	re      *regexp.Regexp
 }
 
-// OutputRedactor applies regex-based output redaction with bounded overlap
-// so matches can be detected across chunk boundaries.
+// OutputRedactor redacts streamed tool output in two stages:
+//
+//  1. Literal secrets (injected credential values). Only the trailing bytes
+//     that could still be the start of a secret are held back; everything
+//     else is released at once, so prompts without a newline stay visible.
+//  2. Regex rules from redact_output, with a bounded overlap carry so matches
+//     spanning chunks are found. They only see stage-1 output, which never
+//     contains part of a secret that is still arriving.
 type OutputRedactor struct {
+	secrets     [][]byte // longest first
+	secretCarry []byte
+
 	rules   []outputRedactionRule
 	carry   []byte
 	overlap int
@@ -75,35 +85,82 @@ func NewOutputRedactorWithSecrets(rules []config.ToolRedactRule, secrets []strin
 	sort.Slice(literals, func(i, j int) bool { return len(literals[i]) > len(literals[j]) })
 
 	if r == nil {
-		r = &OutputRedactor{overlap: defaultRedactionOverlapBytes}
+		r = &OutputRedactor{}
 	}
-	// Literal secrets run before the tool's own rules: a user regex that
-	// rewrites part of a secret would otherwise leave a fragment the literal
-	// no longer matches.
-	replace := []byte(config.DefaultRedactReplacement)
-	secretRules := make([]outputRedactionRule, 0, len(literals))
-	for _, s := range literals {
-		secretRules = append(secretRules, outputRedactionRule{
-			re:      regexp.MustCompile(regexp.QuoteMeta(s)),
-			replace: replace,
-		})
-		// The carry must hold all but the last byte of a secret for matches
-		// that span chunk boundaries.
-		if len(s) > r.overlap {
-			r.overlap = len(s)
-		}
+	for _, lit := range literals {
+		r.secrets = append(r.secrets, []byte(lit))
 	}
-	r.rules = append(secretRules, r.rules...)
 	return r
 }
 
-// RedactChunk redacts one output chunk. When finalize is false it keeps a
-// bounded carry to catch matches that span chunk boundaries.
+// RedactChunk redacts one output chunk. When finalize is false it may keep
+// a carry to catch matches that span chunk boundaries.
 func (r *OutputRedactor) RedactChunk(data []byte, finalize bool) []byte {
 	if r == nil {
 		return data
 	}
 
+	if len(r.secrets) > 0 {
+		data = r.redactSecrets(data, finalize)
+	}
+	if len(r.rules) == 0 {
+		return data
+	}
+	return r.redactRules(data, finalize)
+}
+
+// redactSecrets replaces literal secrets and holds back only a trailing
+// partial match.
+func (r *OutputRedactor) redactSecrets(data []byte, finalize bool) []byte {
+	buf := append(r.secretCarry, data...)
+	r.secretCarry = nil
+	if len(buf) == 0 {
+		return nil
+	}
+
+	replace := []byte(config.DefaultRedactReplacement)
+	out := make([]byte, 0, len(buf))
+	for i := 0; i < len(buf); {
+		rest := buf[i:]
+		// A tail that is a proper prefix of a secret might complete in the
+		// next chunk. Wait for it, even if a shorter secret already matches.
+		if !finalize && r.isSecretPrefix(rest) {
+			r.secretCarry = append([]byte(nil), rest...)
+			break
+		}
+		if n := r.matchSecret(rest); n > 0 {
+			out = append(out, replace...)
+			i += n
+			continue
+		}
+		out = append(out, buf[i])
+		i++
+	}
+	return out
+}
+
+// isSecretPrefix reports whether b is a proper prefix of any secret.
+func (r *OutputRedactor) isSecretPrefix(b []byte) bool {
+	for _, s := range r.secrets {
+		if len(b) < len(s) && bytes.HasPrefix(s, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchSecret returns the length of the longest secret b starts with, or 0.
+func (r *OutputRedactor) matchSecret(b []byte) int {
+	for _, s := range r.secrets { // longest first
+		if bytes.HasPrefix(b, s) {
+			return len(s)
+		}
+	}
+	return 0
+}
+
+// redactRules applies the regex rules with a bounded overlap carry.
+func (r *OutputRedactor) redactRules(data []byte, finalize bool) []byte {
 	if len(data) == 0 && !finalize {
 		return nil
 	}

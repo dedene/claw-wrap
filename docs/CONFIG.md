@@ -1071,6 +1071,8 @@ Behavior notes:
 - Works for both inline and file-backed output responses
 - Rules are applied in order
 - Invalid regex patterns are rejected during config validation
+- To catch matches across chunk boundaries, the last 128 bytes are held back until more output arrives or the tool exits. A prompt without a trailing newline can stay invisible until then, so avoid `redact_output` on interactive tools
+- Injected credential values are redacted before these rules run and hold back only a trailing partial match, so they do not delay prompts
 
 ### `working_dir` (optional)
 

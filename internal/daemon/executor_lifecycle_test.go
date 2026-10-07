@@ -21,6 +21,10 @@ import (
 // to simulate a slow consumer.
 var clientReadDelay time.Duration
 
+// clientAnswer, when set, makes the test client send "y\n" on stdin as soon as
+// the given prompt text has arrived on stdout.
+var clientAnswer string
+
 type execResult struct {
 	stdout   string
 	stderr   string
@@ -71,6 +75,13 @@ func runHelperToolWith(t *testing.T, tool config.ToolDef, req protocol.ProxyRequ
 	var res execResult
 	var stdout, stderr strings.Builder
 	dec := framing.NewDecoder(clientSide)
+	answered := false
+	answer := func() {
+		msg := protocol.WrapperMessage{Type: protocol.MsgTypeStdin, Data: base64.StdEncoding.EncodeToString([]byte("y\n"))}
+		if err := framing.NewNDJSONWriter(clientSide).Write(&msg); err != nil {
+			t.Errorf("send stdin: %v", err)
+		}
+	}
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -93,6 +104,10 @@ func runHelperToolWith(t *testing.T, tool config.ToolDef, req protocol.ProxyRequ
 				}
 				if msg.Type == protocol.MsgTypeStdout {
 					stdout.Write(data)
+					if clientAnswer != "" && !answered && strings.Contains(stdout.String(), clientAnswer) {
+						answered = true
+						go answer()
+					}
 				} else {
 					stderr.Write(data)
 				}

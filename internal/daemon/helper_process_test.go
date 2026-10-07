@@ -50,6 +50,16 @@ func runHelper(mode string, args []string) int {
 		_ = w.Flush()
 		return 0
 
+	case "prompt":
+		// Interactive confirmation: no trailing newline, then wait for input.
+		fmt.Fprint(os.Stdout, "Continue? [y/N] ")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return 3
+		}
+		fmt.Fprint(os.Stdout, "answer:"+line)
+		return 0
+
 	case "read-stdin":
 		// Mimics a CLI that prompts for input; EOF means "non-interactive".
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
