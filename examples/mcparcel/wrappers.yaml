@@ -1,0 +1,62 @@
+# claw-wrap sidecar config: broker a CLI that talks to an MCP server.
+#
+# Example: an agent may call a handful of Front tools through `mcparcel call`.
+# The sidecar holds the OAuth client credentials; mcparcel exchanges them for
+# short-lived tokens and enforces its own tool policy on top of this one.
+#
+# This file is loaded by internal/daemon/mcparcel_policy_test.go, so every
+# change here is covered by the regression tests.
+
+security:
+  # Caller exe verification cannot work across containers (separate PID
+  # namespaces: the peer PID is 0). UID check + HMAC are the boundary.
+  deny_unverified_caller_exe: false
+
+credentials:
+  front_client_id:
+    source: file:/etc/claw-wrap/secrets/front-client-id
+  front_client_secret:
+    source: file:/etc/claw-wrap/secrets/front-client-secret
+
+audit:
+  enabled: true
+  stdout: true          # JSONL on stdout; daemon logs go to stderr
+  include_args: true
+
+tools:
+  mcparcel:
+    binary: /usr/local/bin/mcparcel
+    timeout: 120s
+    # The caller's cwd does not exist in the sidecar; run here instead.
+    working_dir: /var/lib/claw-wrap
+    # Non-interactive: stdin is /dev/null (implies no PTY), so a prompt fails
+    # immediately instead of hanging until the timeout.
+    use_stdin: false
+    # The agent signs its own requests, so any env it sends is untrusted.
+    # Accept none: a tool-specific variable (say, a server URL) could
+    # otherwise redirect the credentials.
+    request_env: []
+    env:
+      FRONT_CLIENT_ID: front_client_id
+      FRONT_CLIENT_SECRET: front_client_secret
+    mode: allowlist
+    # Checked first. Defense in depth only: the argv rules below already pin
+    # every position, so no flag can sneak in anywhere.
+    blocked_args:
+      - pattern: '^--?config(=|$)'
+        message: "config overrides are not allowed"
+    # match: argv = one full-match regex per argument, exact argument count.
+    # Arguments are never joined, so spaces or newlines inside an argument
+    # cannot shift or widen a match.
+    allowed_args:
+      - match: argv
+        argv:
+          - 'call'
+          - 'front\.(read_conversation|create_draft|update_draft|add_comment|tag_conversation|list_tags|list_teammates|assign_conversation)'
+          - '--args'
+          - '(?s)\{.*\}'
+        message: "only allowlisted Front tools via: mcparcel call front.<tool> [--args '<json>']"
+      - match: argv
+        argv:
+          - 'call'
+          - 'front\.(read_conversation|create_draft|update_draft|add_comment|tag_conversation|list_tags|list_teammates|assign_conversation)'

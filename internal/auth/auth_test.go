@@ -359,6 +359,32 @@ func TestWriteSecret_LoadSecret_Roundtrip(t *testing.T) {
 	}
 }
 
+func TestWriteSecretWithMode_CustomMode(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "auth-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	secretPath := filepath.Join(tmpDir, "auth-secret")
+	secret, err := GenerateSecret()
+	if err != nil {
+		t.Fatalf("GenerateSecret() error = %v", err)
+	}
+
+	if err := WriteSecretWithMode(secretPath, secret, 0o640); err != nil {
+		t.Fatalf("WriteSecretWithMode() error = %v", err)
+	}
+
+	info, err := os.Stat(secretPath)
+	if err != nil {
+		t.Fatalf("Failed to stat secret file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("WriteSecretWithMode() file mode = %o, want 0640", got)
+	}
+}
+
 func TestLoadSecret_NotFound(t *testing.T) {
 	_, err := LoadSecret("/nonexistent/path/to/secret")
 	if err != ErrSecretNotFound {

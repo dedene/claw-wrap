@@ -4,6 +4,7 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -89,6 +90,33 @@ func (l *FileLogger) Close() error {
 	return l.file.Close()
 }
 
+// stdoutWriter is the destination of the stdout logger (swapped in tests).
+var stdoutWriter io.Writer = os.Stdout
+
+// StreamLogger writes JSONL entries to a stream it does not own, such as the
+// daemon's stdout in a container where logs are collected from the stream.
+type StreamLogger struct {
+	mu  sync.Mutex
+	enc *json.Encoder
+}
+
+// NewStreamLogger returns a logger that writes JSONL to w.
+func NewStreamLogger(w io.Writer) *StreamLogger {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return &StreamLogger{enc: enc}
+}
+
+// Log writes an entry as a single JSONL line.
+func (l *StreamLogger) Log(entry Entry) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.enc.Encode(entry)
+}
+
+// Close is a no-op: the stream belongs to the caller.
+func (l *StreamLogger) Close() error { return nil }
+
 // MultiLogger fans out to multiple loggers.
 type MultiLogger struct {
 	loggers []Logger
@@ -130,6 +158,10 @@ func New(cfg *config.AuditConfig) (Logger, error) {
 			return nil, fmt.Errorf("audit file logger: %w", err)
 		}
 		loggers = append(loggers, fl)
+	}
+
+	if cfg.Stdout {
+		loggers = append(loggers, NewStreamLogger(stdoutWriter))
 	}
 
 	if cfg.Syslog {

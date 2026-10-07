@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"log"
+	"regexp"
 	"strings"
 
 	"claw-wrap/internal/config"
@@ -74,6 +75,17 @@ func checkAllowedArgs(args []string, allowed []config.BlockedArg) (bool, string)
 	joinedArgs := strings.Join(args, " ")
 
 	for _, a := range allowed {
+		if a.Match == config.BlockedArgMatchArgv {
+			if len(a.CompiledArgv) == 0 || len(a.CompiledArgv) != len(a.Argv) {
+				log.Printf("[ERROR] uncompiled argv rule in allowed_args %q - fail-closed", a.Argv)
+				return false, "internal error: invalid security pattern"
+			}
+			if matchArgv(args, a.CompiledArgv) {
+				return true, ""
+			}
+			continue
+		}
+
 		if a.Compiled == nil {
 			log.Printf("[ERROR] nil compiled pattern for allowed_args %q - fail-closed", a.Pattern)
 			return false, "internal error: invalid security pattern"
@@ -98,6 +110,21 @@ func checkAllowedArgs(args []string, allowed []config.BlockedArg) (bool, string)
 
 	// No allowed pattern matched.
 	return false, allowedArgMessage(allowed)
+}
+
+// matchArgv reports whether args has exactly one argument per pattern and
+// every argument fully matches the pattern at its position. Patterns are
+// anchored at config load time.
+func matchArgv(args []string, patterns []*regexp.Regexp) bool {
+	if len(args) != len(patterns) {
+		return false
+	}
+	for i, re := range patterns {
+		if !re.MatchString(args[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func allowedArgMessage(allowed []config.BlockedArg) string {

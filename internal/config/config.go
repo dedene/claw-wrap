@@ -133,6 +133,7 @@ type InjectSpec struct {
 type AuditConfig struct {
 	Enabled           bool   `yaml:"enabled"`
 	File              string `yaml:"file"`
+	Stdout            bool   `yaml:"stdout"` // JSONL to the daemon's stdout (containers)
 	IncludeArgs       *bool  `yaml:"include_args"`
 	IncludeOutputHash *bool  `yaml:"include_output_hash"`
 	IncludeDuration   *bool  `yaml:"include_duration"`
@@ -248,17 +249,32 @@ type ToolDef struct {
 	AllowedArgs  []BlockedArg      `yaml:"allowed_args,omitempty"`
 	RedactOutput []ToolRedactRule  `yaml:"redact_output,omitempty"`
 	ConfigFile   *ConfigFileDef    `yaml:"config_file,omitempty"`
-	UseProxy     bool              `yaml:"use_proxy,omitempty"` // Enable HTTP proxy for this tool
-	UsePTY       *bool             `yaml:"use_pty,omitempty"`   // PTY mode: nil=default on, false=opt out
+	UseProxy     bool              `yaml:"use_proxy,omitempty"`   // Enable HTTP proxy for this tool
+	UsePTY       *bool             `yaml:"use_pty,omitempty"`     // PTY mode: nil=default on, false=opt out
+	UseStdin     *bool             `yaml:"use_stdin,omitempty"`   // nil=default on; false=stdin is /dev/null
+	WorkingDir   string            `yaml:"working_dir,omitempty"` // fixed cwd; caller cwd is ignored when set
+	// RequestEnv allowlists env vars the caller may set. nil = any var not on
+	// the deny list (legacy); empty = none.
+	RequestEnv []string `yaml:"request_env,omitempty"`
 }
 
 // GetUsePTY returns whether PTY mode is enabled for this tool.
-// Defaults to true when not explicitly configured.
+// Defaults to true when not explicitly configured, unless stdin is disabled:
+// a PTY is an interactive terminal, which contradicts use_stdin: false.
 func (t ToolDef) GetUsePTY() bool {
 	if t.UsePTY == nil {
-		return true
+		return t.GetUseStdin()
 	}
 	return *t.UsePTY
+}
+
+// GetUseStdin returns whether the caller's stdin is forwarded to the tool.
+// Defaults to true. When false the tool reads from /dev/null.
+func (t ToolDef) GetUseStdin() bool {
+	if t.UseStdin == nil {
+		return true
+	}
+	return *t.UseStdin
 }
 
 // ToolRedactRule defines an output redaction rule for tool stdout/stderr.
@@ -268,12 +284,14 @@ type ToolRedactRule struct {
 	Compiled *regexp.Regexp `yaml:"-"`
 }
 
-// BlockedArg defines a blocked argument pattern.
+// BlockedArg defines an argument rule, used by both blocked_args and allowed_args.
 type BlockedArg struct {
-	Pattern  string         `yaml:"pattern"`
-	Message  string         `yaml:"message"`
-	Match    string         `yaml:"match,omitempty"` // arg (default) or command
-	Compiled *regexp.Regexp `yaml:"-"`               // compiled at validation time
+	Pattern      string           `yaml:"pattern"`
+	Message      string           `yaml:"message"`
+	Match        string           `yaml:"match,omitempty"` // arg (default), command, or argv (allowed_args only)
+	Argv         []string         `yaml:"argv,omitempty"`  // match: argv — one full-match pattern per position
+	Compiled     *regexp.Regexp   `yaml:"-"`               // compiled at validation time
+	CompiledArgv []*regexp.Regexp `yaml:"-"`               // compiled argv patterns, anchored ^(?:p)$
 }
 
 // ConfigFileDef defines a temporary config file to generate.
@@ -289,6 +307,9 @@ const (
 	BlockedArgMatchArg = "arg"
 	// BlockedArgMatchCommand matches against strings.Join(args, " ").
 	BlockedArgMatchCommand = "command"
+	// BlockedArgMatchArgv matches args positionally: exactly one argument per
+	// argv pattern, each pattern a full match. Only valid in allowed_args.
+	BlockedArgMatchArgv = "argv"
 
 	// ToolModeBlocklist rejects commands matching blocked_args (default).
 	ToolModeBlocklist = "blocklist"
@@ -360,6 +381,25 @@ func (c *Config) Validate() error {
 			log.Printf("[WARN] tool %q: binary %q not found on disk: %v", toolName, tool.Binary, err)
 		}
 
+		if tool.WorkingDir != "" {
+			if !filepath.IsAbs(tool.WorkingDir) {
+				return fmt.Errorf("tool %q: working_dir must be absolute: %q", toolName, tool.WorkingDir)
+			}
+			if info, err := os.Stat(tool.WorkingDir); err != nil || !info.IsDir() {
+				log.Printf("[WARN] tool %q: working_dir %q is not an existing directory", toolName, tool.WorkingDir)
+			}
+		}
+
+		for _, name := range tool.RequestEnv {
+			if !envVarNameRegex.MatchString(name) {
+				return fmt.Errorf("tool %q: invalid request_env name %q", toolName, name)
+			}
+		}
+
+		if tool.UsePTY != nil && *tool.UsePTY && !tool.GetUseStdin() {
+			return fmt.Errorf("tool %q: use_pty: true conflicts with use_stdin: false", toolName)
+		}
+
 		// Build credential names set for validation
 		credNames := CredentialNamesSet(c.Credentials)
 
@@ -397,23 +437,10 @@ func (c *Config) Validate() error {
 		}
 
 		// Compile blocked_args regex patterns.
-		for i, b := range tool.BlockedArgs {
-			matchMode := strings.TrimSpace(b.Match)
-			if matchMode == "" {
-				matchMode = BlockedArgMatchArg
+		for i := range tool.BlockedArgs {
+			if err := compileArgRule(&c.Tools[toolName].BlockedArgs[i], "blocked_args", false); err != nil {
+				return fmt.Errorf("tool %q: %w", toolName, err)
 			}
-			switch matchMode {
-			case BlockedArgMatchArg, BlockedArgMatchCommand:
-			default:
-				return fmt.Errorf("tool %q: invalid blocked_args match %q (must be %q or %q)", toolName, b.Match, BlockedArgMatchArg, BlockedArgMatchCommand)
-			}
-
-			re, err := regexp.Compile(b.Pattern)
-			if err != nil {
-				return fmt.Errorf("tool %q: invalid blocked_args pattern %q: %w", toolName, b.Pattern, err)
-			}
-			c.Tools[toolName].BlockedArgs[i].Match = matchMode
-			c.Tools[toolName].BlockedArgs[i].Compiled = re
 		}
 
 		// Validate and normalize mode.
@@ -438,23 +465,10 @@ func (c *Config) Validate() error {
 		}
 
 		// Compile allowed_args regex patterns.
-		for i, a := range tool.AllowedArgs {
-			matchMode := strings.TrimSpace(a.Match)
-			if matchMode == "" {
-				matchMode = BlockedArgMatchArg
+		for i := range tool.AllowedArgs {
+			if err := compileArgRule(&c.Tools[toolName].AllowedArgs[i], "allowed_args", true); err != nil {
+				return fmt.Errorf("tool %q: %w", toolName, err)
 			}
-			switch matchMode {
-			case BlockedArgMatchArg, BlockedArgMatchCommand:
-			default:
-				return fmt.Errorf("tool %q: invalid allowed_args match %q (must be %q or %q)", toolName, a.Match, BlockedArgMatchArg, BlockedArgMatchCommand)
-			}
-
-			re, err := regexp.Compile(a.Pattern)
-			if err != nil {
-				return fmt.Errorf("tool %q: invalid allowed_args pattern %q: %w", toolName, a.Pattern, err)
-			}
-			c.Tools[toolName].AllowedArgs[i].Match = matchMode
-			c.Tools[toolName].AllowedArgs[i].Compiled = re
 		}
 
 		// Store normalized mode.
@@ -1184,8 +1198,8 @@ var validSyslogFacilities = map[string]bool{
 func (c *Config) validateAudit() error {
 	a := c.Audit
 
-	if a.File == "" && !a.Syslog {
-		return fmt.Errorf("at least one output (file or syslog) must be configured")
+	if a.File == "" && !a.Syslog && !a.Stdout {
+		return fmt.Errorf("at least one output (file, stdout or syslog) must be configured")
 	}
 	if a.File != "" && !filepath.IsAbs(a.File) {
 		return fmt.Errorf("file path must be absolute: %q", a.File)
